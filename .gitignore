@@ -6,6 +6,8 @@ __pycache__/
 
 # Dataset
 dataset/
+processed_images.txt
+
 
 # Frontend
 frontend/node_modules/
