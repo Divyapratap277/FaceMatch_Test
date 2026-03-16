@@ -32,6 +32,10 @@ export default function FaceMatch() {
   const [progress, setProgress] = useState(0);
   const [showCamera, setShowCamera] = useState(false);
   const [stream, setStream] = useState(null);
+  const baselineRef = useRef(null);      // stores baseline measurements
+  const blinkStateRef = useRef("open");  // open → closed → open = blink done
+  const earHistoryRef = useRef([]);      // last 5 EAR values for smoothing
+
 
   // Liveness + Geo states
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -235,58 +239,119 @@ const reverseGeocode = useCallback(async (lat, long) => {
 
   // Liveness detection loop — runs every 200ms via setInterval
   const runLivenessLoop = useCallback(async () => {
-    if (isDetectingRef.current) return;
-    if (!videoRef.current || videoRef.current.readyState < 2) return;
-    if (challengeIndexRef.current >= CHALLENGES.length) return;
+  if (isDetectingRef.current) return;
+  if (!videoRef.current || videoRef.current.readyState < 2) return;
+  if (challengeIndexRef.current >= CHALLENGES.length) return;
 
-    isDetectingRef.current = true;
-    const video = videoRef.current;
+  isDetectingRef.current = true;
+  const video = videoRef.current;
 
-    try {
-      const detection = await faceapi
-        .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
-        .withFaceLandmarks()
-        .withFaceExpressions();
+  try {
+    const detection = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({
+        inputSize: 320,          // increased from 224 → more accurate
+        scoreThreshold: 0.35,
+      }))
+      .withFaceLandmarks()
+      .withFaceExpressions();
 
-      // Always draw mesh regardless of challenge
-      drawFaceMesh(detection || null, video);
+    drawFaceMesh(detection || null, video);
 
-      if (detection) {
-        const pts  = detection.landmarks.positions;
-        const expr = detection.expressions;
-        const challenge = CHALLENGES[challengeIndexRef.current];
+    if (detection) {
+      const pts  = detection.landmarks.positions;
+      const expr = detection.expressions;
 
-        if (challenge === "blink") {
-          const ear = (eyeAspectRatio(pts.slice(36, 42)) + eyeAspectRatio(pts.slice(42, 48))) / 2;
-          if (ear < 0.25) markChallengeDone("blink");
-
-        } else if (challenge === "turn_left") {
-          const noseTip   = pts[30];
-          const faceCenter = (pts[0].x + pts[16].x) / 2;
-          if (noseTip.x < faceCenter - 8) markChallengeDone("turn_left");
-
-        } else if (challenge === "nod") {
-          const noseTip  = pts[30];
-          const forehead = pts[27];
-          if (noseTip.y - forehead.y > 55) markChallengeDone("nod");
-
-        } else if (challenge === "smile") {
-          if (expr.happy > 0.55) markChallengeDone("smile");
-
-        } else if (challenge === "mouth_open") {
-          const upperLip = pts[62];
-          const lowerLip = pts[66];
-          if (Math.abs(upperLip.y - lowerLip.y) > 18) markChallengeDone("mouth_open");
-        }
-      } else {
-        // Clear mesh if no face
-        const canvas = overlayCanvasRef.current;
-        if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+      // ── Step 1: Calibrate baseline on first detection ──
+      if (!baselineRef.current) {
+        const leftEAR  = eyeAspectRatio(pts.slice(36, 42));
+        const rightEAR = eyeAspectRatio(pts.slice(42, 48));
+        const faceWidth = Math.abs(pts[16].x - pts[0].x);
+        baselineRef.current = {
+          ear:         (leftEAR + rightEAR) / 2,   // normal open-eye EAR
+          noseCenterX: pts[30].x - (pts[0].x + pts[16].x) / 2, // nose offset from center
+          noseTipY:    pts[30].y,                  // nose Y at neutral
+          faceWidth:   faceWidth,
+        };
+        console.log("✅ Baseline calibrated:", baselineRef.current);
+        isDetectingRef.current = false;
+        return;
       }
-    } catch (_) {}
 
-    isDetectingRef.current = false;
-  }, []);
+      const base    = baselineRef.current;
+      const challenge = CHALLENGES[challengeIndexRef.current];
+
+      // ── BLINK: state machine open→closed→open ──
+      if (challenge === "blink") {
+        const leftEAR  = eyeAspectRatio(pts.slice(36, 42));
+        const rightEAR = eyeAspectRatio(pts.slice(42, 48));
+        const ear = (leftEAR + rightEAR) / 2;
+
+        // Smooth EAR over last 3 readings
+        earHistoryRef.current.push(ear);
+        if (earHistoryRef.current.length > 3) earHistoryRef.current.shift();
+        const smoothEAR = earHistoryRef.current.reduce((a, b) => a + b, 0) / earHistoryRef.current.length;
+
+        // Blink threshold = 75% of baseline (works for all face sizes/distances)
+        const blinkThreshold = base.ear * 0.75;
+
+        if (blinkStateRef.current === "open" && smoothEAR < blinkThreshold) {
+          blinkStateRef.current = "closed";
+          console.log(`👁 Eyes closed — EAR: ${smoothEAR.toFixed(3)} < ${blinkThreshold.toFixed(3)}`);
+        } else if (blinkStateRef.current === "closed" && smoothEAR >= blinkThreshold) {
+          blinkStateRef.current = "open";
+          console.log("👁 Blink complete!");
+          markChallengeDone("blink");
+        }
+
+      // ── HEAD TURN LEFT: relative nose shift from baseline ──
+      } else if (challenge === "turn_left") {
+        const faceCenter  = (pts[0].x + pts[16].x) / 2;
+        const noseOffset  = pts[30].x - faceCenter;
+        // Must move left by at least 20% of face width from baseline
+        const threshold   = base.faceWidth * 0.20;
+        const delta       = base.noseCenterX - noseOffset;
+
+        console.log(`↩ Head turn delta: ${delta.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
+        if (delta > threshold) markChallengeDone("turn_left");
+
+      // ── NOD: relative nose Y drop from baseline ──
+      } else if (challenge === "nod") {
+        const nodDelta = pts[30].y - base.noseTipY;
+        // Must nod down by at least 15% of face width
+        const threshold = base.faceWidth * 0.15;
+
+        console.log(`↕ Nod delta: ${nodDelta.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
+        if (nodDelta > threshold) markChallengeDone("nod");
+
+      // ── SMILE: expression confidence ──
+      } else if (challenge === "smile") {
+        console.log(`😊 Happy: ${expr.happy.toFixed(2)}`);
+        if (expr.happy > 0.60) markChallengeDone("smile");
+
+      // ── MOUTH OPEN: relative lip distance ──
+      } else if (challenge === "mouth_open") {
+        const mouthOpen = Math.abs(pts[62].y - pts[66].y);
+        // Must open mouth by at least 8% of face width
+        const threshold = base.faceWidth * 0.08;
+        console.log(`😮 Mouth open: ${mouthOpen.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
+        if (mouthOpen > threshold) markChallengeDone("mouth_open");
+      }
+
+    } else {
+      // No face — reset baseline so it recalibrates when face returns
+      baselineRef.current = null;
+      earHistoryRef.current = [];
+      blinkStateRef.current = "open";
+      const canvas = overlayCanvasRef.current;
+      if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    }
+  } catch (e) {
+    console.warn("Detection error:", e);
+  }
+
+  isDetectingRef.current = false;
+}, []);
+
 
   const handleFile = (f) => {
     if (!f || !f.type.startsWith("image/")) return;
