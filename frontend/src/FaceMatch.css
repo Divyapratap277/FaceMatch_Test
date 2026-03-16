@@ -26,6 +26,10 @@ body {
   gap: 24px;
 }
 
+.fm-container-wide {
+  max-width: 1350px;
+}
+
 /* Header: stuck to top, full width left–right–top */
 .fm-header-banner {
   position: fixed;
@@ -102,6 +106,95 @@ body {
   font-size: 13px;
   color: #94a3b8;
   margin-top: 3px;
+}
+
+/* Upload + Camera row: dropzone left, selfie right; same row, no wrap */
+.fm-upload-camera-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 24px;
+  width: 100%;
+  max-width: 1350px;
+  align-self: flex-start;
+}
+
+.fm-left-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
+.fm-right-col {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.fm-left-col .fm-btn-row {
+  width: 100%;
+  max-width: 520px;
+  justify-content: center;
+}
+
+/* Scan frame outside camera box */
+.fm-camera-outer {
+  position: relative;
+}
+
+.fm-scan-frame {
+  position: absolute;
+  inset: -10px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.fm-scan-frame .fm-scan-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, #24aa4d, #5edd7c, transparent);
+  box-shadow: 0 0 16px #24aa4d;
+  animation: scanMove 1.8s ease-in-out infinite;
+}
+
+.fm-scan-frame .fm-scan-corners {
+  position: absolute;
+  inset: 0;
+}
+
+.fm-scan-frame .fm-scan-corners .corner {
+  width: 24px;
+  height: 24px;
+  border-width: 4px;
+  border-color: #24aa4d;
+  border-style: solid;
+}
+
+.fm-scan-frame .corner.tl { top: 0; left: 0; border-width: 4px 0 0 4px; }
+.fm-scan-frame .corner.tr { top: 0; right: 0; border-width: 4px 4px 0 0; }
+.fm-scan-frame .corner.bl { bottom: 0; left: 0; border-width: 0 0 4px 4px; }
+.fm-scan-frame .corner.br { bottom: 0; right: 0; border-width: 0 4px 4px 0; }
+
+/* Liveness beside camera box */
+.fm-liveness-beside {
+  position: static !important;
+  transform: none !important;
+  left: auto !important;
+  min-width: 260px;
+  max-width: 280px;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 /* Dropzone */
@@ -570,12 +663,11 @@ body {
   color: #fff;
 }
 
-/* Camera Feed */
+/* Camera Feed — same size as dropzone (520×260) */
 .fm-camera-wrapper {
   position: relative;
-  width: 100%;
-  max-width: 520px;
-  height: 300px;
+  width: 520px;
+  height: 260px;
   border-radius: 16px;
   overflow: hidden;
   border: 2px solid #24aa4d;
@@ -744,3 +836,71 @@ body {
 .fm-liveness-step.pending { color: #888; }
 .fm-liveness-msg     { font-size: 12px; color: #ccc; margin-top: 6px; }
 .fm-liveness-success { color: #24aa4d; font-size: 16px; font-weight: 700; padding: 8px; }
+
+
+/* GPS Map Camera style geo card */
+.fm-geo-card {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  background: rgba(30, 30, 30, 0.92);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 10px 0;
+  max-width: 520px;
+}
+
+.fm-geo-map {
+  position: relative;
+  width: 110px;
+  min-width: 110px;
+  background: #111;
+  overflow: hidden;
+}
+.fm-geo-map-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.fm-geo-map-pin {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -100%);
+  font-size: 22px;
+}
+
+.fm-geo-details {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+}
+.fm-geo-city {
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+}
+.fm-geo-full-address {
+  font-size: 11px;
+  color: #bbb;
+  line-height: 1.4;
+}
+.fm-geo-coords {
+  font-size: 12px;
+  color: #aaa;
+  font-family: monospace;
+  margin-top: 2px;
+}
+.fm-geo-time {
+  font-size: 11px;
+  color: #888;
+}
+
+
+.fm-geo-map .leaflet-container {
+  border-radius: 0;
+  z-index: 0;
+}

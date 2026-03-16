@@ -5,6 +5,9 @@ import mainBg from "./Main background.svg?url";
 import masterDemoHeader from "./master-demo-header.svg?url";
 import headerMasterDemo from "./header-master-demo.svg?url";
 import bargadBranding from "./bargad-branding (1).svg?url";
+import { MapContainer, TileLayer, Marker } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+import L from "leaflet";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -38,6 +41,7 @@ export default function FaceMatch() {
   const [challengeMsg, setChallengeMsg] = useState("");
   const [geoData, setGeoData] = useState(null);
   const [geoError, setGeoError] = useState(null);
+  const [geoAddress, setGeoAddress] = useState(null);
 
   const videoRef = useRef();
   const canvasRef = useRef();
@@ -68,20 +72,54 @@ export default function FaceMatch() {
 
   // Geo capture
   const captureGeo = useCallback(() => {
-    return new Promise((resolve) => {
-      if (!navigator.geolocation) return resolve(null);
-      navigator.geolocation.getCurrentPosition(
-        (pos) =>
-          resolve({
-            lat: pos.coords.latitude.toFixed(6),
-            long: pos.coords.longitude.toFixed(6),
-            timestamp: new Date().toISOString(),
-          }),
-        () => resolve(null),
-        { timeout: 6000 }
-      );
-    });
-  }, []);
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({
+        lat: pos.coords.latitude.toFixed(7),   // 7 decimal places = ~1cm accuracy
+        long: pos.coords.longitude.toFixed(7),
+        timestamp: new Date().toISOString(),
+      }),
+      () => resolve(null),
+      {
+        enableHighAccuracy: true,   // uses GPS chip, not WiFi/IP
+        maximumAge: 0,              // never use cached location
+        timeout: 12000,             // wait up to 12 seconds
+      }
+    );
+  });
+}, []);
+
+// Reverse geocode using Nominatim (free, no API key)
+// BigDataCloud — free, no API key, instant response
+const reverseGeocode = useCallback(async (lat, long) => {
+  try {
+    const res = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${long}&localityLanguage=en`
+    );
+    const data = await res.json();
+
+    const parts = [
+      data.locality,
+      data.principalSubdivision,
+      data.countryName,
+    ].filter(Boolean);
+
+    return {
+      city: data.locality || data.city || "",
+      state: data.principalSubdivision || "",
+      country: data.countryName || "",
+      full: data.localityInfo?.administrative
+        ?.map((a) => a.name)
+        .filter(Boolean)
+        .join(", ") || parts.join(", "),
+      short: parts.join(", "),
+    };
+  } catch {
+    return null;
+  }
+}, []);
+
 
   // Eye Aspect Ratio for blink
   const eyeAspectRatio = (eyePts) => {
@@ -336,9 +374,14 @@ export default function FaceMatch() {
     setProgress(0);
     setGeoError(null);
 
-    const geo = await captureGeo();
-    setGeoData(geo);
-    if (!geo) setGeoError("⚠ Location unavailable — proceeding without geo.");
+ const geo = await captureGeo();
+setGeoData(geo);
+setGeoAddress(null); // reset on each match
+if (!geo) {
+  setGeoError("⚠ Location unavailable — proceeding without geo.");
+} else {
+  reverseGeocode(geo.lat, geo.long).then((addr) => setGeoAddress(addr));
+}
 
     const interval = setInterval(() => {
       setProgress((p) => {
@@ -418,7 +461,7 @@ export default function FaceMatch() {
         <img src={headerMasterDemo} alt="Header" className="fm-header-logo" />
       </header>
 
-      <div className="fm-container">
+      <div className={`fm-container ${showCamera ? "fm-container-wide" : ""}`}>
 
         <div className="fm-header">
           <div className="fm-logo">⬡</div>
@@ -428,54 +471,148 @@ export default function FaceMatch() {
           </div>
         </div>
 
-        {/* Upload Box */}
-        <div
-          className={`fm-dropzone ${dragging ? "active" : ""} ${preview ? "has-preview" : ""}`}
-          onClick={() => inputRef.current.click()}
-          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={handleDrop}
-        >
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={(e) => handleFile(e.target.files[0])}
-          />
-          {preview ? (
-            <div className="fm-preview">
-              <img src={preview} alt="Preview" />
-              <div className="fm-preview-overlay">Click to change</div>
+        {/* Upload Box + when camera on: row with dropzone left (same size), camera right (same size), liveness beside camera; buttons only below dropzone */}
+        <div className={showCamera ? "fm-upload-camera-row" : ""}>
+          <div className="fm-left-col">
+            <div
+              className={`fm-dropzone ${dragging ? "active" : ""} ${preview ? "has-preview" : ""}`}
+              onClick={() => inputRef.current.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={handleDrop}
+            >
+              <input
+                ref={inputRef}
+                type="file"
+                accept="image/*"
+                hidden
+                onChange={(e) => handleFile(e.target.files[0])}
+              />
+              {preview ? (
+                <div className="fm-preview">
+                  <img src={preview} alt="Preview" />
+                  <div className="fm-preview-overlay">Click to change</div>
+                </div>
+              ) : (
+                <div className="fm-drop-content">
+                  <div className="fm-drop-icon">📁</div>
+                  <p>Drag & drop or <span>click to upload</span></p>
+                  <small>JPG, PNG, WEBP supported</small>
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="fm-drop-content">
-              <div className="fm-drop-icon">📁</div>
-              <p>Drag & drop or <span>click to upload</span></p>
-              <small>JPG, PNG, WEBP supported</small>
+            {/* Buttons only below drag & drop */}
+            <div className="fm-btn-row">
+              <button className="fm-btn" onClick={handleMatch} disabled={!file || loading}>
+                {loading ? <><span className="fm-spinner" /> Searching Faces...</> : "Find Matches"}
+              </button>
+              <button className="fm-camera-btn" onClick={showCamera ? stopCamera : startCamera}>
+                {showCamera ? "✕ Cancel" : "Take Selfie Instead"}
+              </button>
+            </div>
+          </div>
+
+          {showCamera && (
+            <div className="fm-right-col">
+              <div className="fm-camera-outer">
+                <div className="fm-camera-wrapper">
+                  <video ref={videoRef} autoPlay playsInline className="fm-camera-feed" />
+                  <canvas ref={overlayCanvasRef} className="fm-mesh-overlay" />
+                  <canvas ref={canvasRef} hidden />
+                  <div className="fm-camera-actions">
+                    {livenessLive && (
+                      <button className="fm-capture-btn" onClick={takeSelfie}>
+                        📸 Capture
+                      </button>
+                    )}
+                    <button className="fm-cancel-btn" onClick={stopCamera}>✕ Cancel</button>
+                  </div>
+                </div>
+                <div className="fm-scan-frame">
+                  <div className="fm-scan-line" />
+                  <div className="fm-scan-corners">
+                    <span className="corner tl" /><span className="corner tr" />
+                    <span className="corner bl" /><span className="corner br" />
+                  </div>
+                </div>
+              </div>
+              <div className="fm-liveness-panel fm-liveness-beside">
+                {!livenessLive ? (
+                  <>
+                    <div className="fm-liveness-title">
+                      {modelsLoaded ? "🔍 Liveness Check" : "⏳ Loading models..."}
+                    </div>
+                    <div className="fm-liveness-steps">
+                      {CHALLENGES.map((c, i) => (
+                        <div
+                          key={c}
+                          className={`fm-liveness-step ${
+                            completedChallenges.includes(c) ? "done" :
+                            i === challengeIndex ? "active" : "pending"
+                          }`}
+                        >
+                          {completedChallenges.includes(c) ? "✅" : i === challengeIndex ? "▶" : "○"}
+                          &nbsp;{CHALLENGE_TEXT[c]}
+                        </div>
+                      ))}
+                    </div>
+                    {challengeMsg && <div className="fm-liveness-msg">{challengeMsg}</div>}
+                  </>
+                ) : (
+                  <div className="fm-liveness-success">✅ Liveness Verified!</div>
+                )}
+              </div>
             </div>
           )}
         </div>
 
         {/* Geo tag display */}
-        {geoData && (
-          <div className="fm-geo-tag">
-            📍 {geoData.lat}, {geoData.long} &nbsp;|&nbsp; 🕐 {new Date(geoData.timestamp).toLocaleTimeString()}
-          </div>
-        )}
-        {geoError && <div className="fm-geo-error">{geoError}</div>}
+        {/* GPS Map Camera style geo tag */}
+{geoData && (
+  <div className="fm-geo-card">
 
-        {/* Buttons */}
-        <div className="fm-btn-row">
-          <button className="fm-btn" onClick={handleMatch} disabled={!file || loading}>
-            {loading ? <><span className="fm-spinner" /> Searching Faces...</> : "Find Matches"}
-          </button>
-          {!showCamera && (
-            <button className="fm-camera-btn" onClick={startCamera}>
-              Take Selfie Instead
-            </button>
-          )}
-        </div>
+    {/* Left: Leaflet Map */}
+    <div className="fm-geo-map">
+      <MapContainer
+        center={[parseFloat(geoData.lat), parseFloat(geoData.long)]}
+        zoom={16}
+        style={{ width: "120px", height: "110px" }}
+        zoomControl={false}
+        dragging={false}
+        scrollWheelZoom={false}
+        doubleClickZoom={false}
+        attributionControl={false}
+      >
+        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+        <Marker position={[parseFloat(geoData.lat), parseFloat(geoData.long)]} />
+      </MapContainer>
+    </div>
+
+    {/* Right: Address */}
+    <div className="fm-geo-details">
+      <div className="fm-geo-city">
+        📍 {geoAddress ? geoAddress.short : "Fetching address..."} 🇮🇳
+      </div>
+      {geoAddress?.full && (
+        <div className="fm-geo-full-address">{geoAddress.full}</div>
+      )}
+      <div className="fm-geo-coords">
+        Lat {parseFloat(geoData.lat).toFixed(6)}° &nbsp; Long {parseFloat(geoData.long).toFixed(6)}°
+      </div>
+      <div className="fm-geo-time">
+        {new Date(geoData.timestamp).toLocaleString("en-IN", {
+          weekday: "long", day: "2-digit", month: "2-digit",
+          year: "numeric", hour: "2-digit", minute: "2-digit",
+          timeZoneName: "short",
+        })}
+      </div>
+    </div>
+
+  </div>
+)}
+{geoError && <div className="fm-geo-error">{geoError}</div>}
+
+
 
         {/* Progress Bar */}
         {loading && (
@@ -495,62 +632,6 @@ export default function FaceMatch() {
               <span className="corner bl" /><span className="corner br" />
             </div>
             <div className="fm-scan-label">Analyzing Face...</div>
-          </div>
-        )}
-
-        {/* Camera View with Liveness + Mesh */}
-        {showCamera && (
-          <div className="fm-camera-wrapper">
-            <video ref={videoRef} autoPlay playsInline className="fm-camera-feed" />
-
-            {/* Face mesh overlay canvas */}
-            <canvas ref={overlayCanvasRef} className="fm-mesh-overlay" />
-
-            <canvas ref={canvasRef} hidden />
-
-            {/* Liveness Challenge Panel */}
-            <div className="fm-liveness-panel">
-              {!livenessLive ? (
-                <>
-                  <div className="fm-liveness-title">
-                    {modelsLoaded ? "🔍 Liveness Check" : "⏳ Loading models..."}
-                  </div>
-                  <div className="fm-liveness-steps">
-                    {CHALLENGES.map((c, i) => (
-                      <div
-                        key={c}
-                        className={`fm-liveness-step ${
-                          completedChallenges.includes(c) ? "done" :
-                          i === challengeIndex ? "active" : "pending"
-                        }`}
-                      >
-                        {completedChallenges.includes(c) ? "✅" : i === challengeIndex ? "▶" : "○"}
-                        &nbsp;{CHALLENGE_TEXT[c]}
-                      </div>
-                    ))}
-                  </div>
-                  {challengeMsg && <div className="fm-liveness-msg">{challengeMsg}</div>}
-                </>
-              ) : (
-                <div className="fm-liveness-success">✅ Liveness Verified!</div>
-              )}
-            </div>
-
-            {/* Camera action buttons */}
-            <div className="fm-camera-actions">
-              {livenessLive && (
-                <button className="fm-capture-btn" onClick={takeSelfie}>
-                  📸 Capture
-                </button>
-              )}
-              <button className="fm-cancel-btn" onClick={stopCamera}>✕ Cancel</button>
-            </div>
-
-            <div className="fm-scan-line" />
-            <div className="fm-scan-corners">
-              <span className="corner tl" /><span className="corner tr" />
-              <span className="corner bl" /><span className="corner br" />
-            </div>
           </div>
         )}
 
