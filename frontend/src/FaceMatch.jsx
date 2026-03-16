@@ -1,4 +1,5 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import * as faceapi from "face-api.js";
 import "./FaceMatch.css";
 import mainBg from "./Main background.svg?url";
 import masterDemoHeader from "./master-demo-header.svg?url";
@@ -7,6 +8,14 @@ import bargadBranding from "./bargad-branding (1).svg?url";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+const CHALLENGES = ["blink", "turn_left", "nod", "smile", "mouth_open"];
+const CHALLENGE_TEXT = {
+  blink:      "👁️ Please BLINK your eyes",
+  turn_left:  "↩️ Turn your head LEFT",
+  nod:        "↕️ NOD your head down",
+  smile:      "😊 Please SMILE",
+  mouth_open: "😮 OPEN your mouth wide",
+};
 
 export default function FaceMatch() {
   const [preview, setPreview] = useState(null);
@@ -15,16 +24,231 @@ export default function FaceMatch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [dragging, setDragging] = useState(false);
-  const [hoverCardIndex, setHoverCardIndex] = useState(null); // Feature: Compare hover
-  const [selectedImg, setSelectedImg] = useState(null);       // Feature B: Modal
-  const [progress, setProgress] = useState(0);  
-  const videoRef = useRef();
-const canvasRef = useRef();
-const [showCamera, setShowCamera] = useState(false);
-const [stream, setStream] = useState(null);
-              // Feature C: Progress bar
+  const [hoverCardIndex, setHoverCardIndex] = useState(null);
+  const [selectedImg, setSelectedImg] = useState(null);
+  const [progress, setProgress] = useState(0);
+  const [showCamera, setShowCamera] = useState(false);
+  const [stream, setStream] = useState(null);
 
+  // Liveness + Geo states
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [challengeIndex, setChallengeIndex] = useState(0);
+  const [completedChallenges, setCompletedChallenges] = useState([]);
+  const [livenessLive, setLivenessLive] = useState(false);
+  const [challengeMsg, setChallengeMsg] = useState("");
+  const [geoData, setGeoData] = useState(null);
+  const [geoError, setGeoError] = useState(null);
+
+  const videoRef = useRef();
+  const canvasRef = useRef();
+  const overlayCanvasRef = useRef();
   const inputRef = useRef();
+  const intervalRef = useRef(null);
+  const challengeIndexRef = useRef(0);
+  const completedRef = useRef([]);
+  const isDetectingRef = useRef(false);
+
+  // Load face-api models once
+  useEffect(() => {
+    const load = async () => {
+      try {
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+          faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
+          faceapi.nets.faceExpressionNet.loadFromUri("/models"),
+        ]);
+        setModelsLoaded(true);
+        console.log("✅ face-api models loaded");
+      } catch (e) {
+        console.warn("face-api models failed to load:", e);
+      }
+    };
+    load();
+  }, []);
+
+  // Geo capture
+  const captureGeo = useCallback(() => {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        (pos) =>
+          resolve({
+            lat: pos.coords.latitude.toFixed(6),
+            long: pos.coords.longitude.toFixed(6),
+            timestamp: new Date().toISOString(),
+          }),
+        () => resolve(null),
+        { timeout: 6000 }
+      );
+    });
+  }, []);
+
+  // Eye Aspect Ratio for blink
+  const eyeAspectRatio = (eyePts) => {
+    const dist = (a, b) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+    const v1 = dist(eyePts[1], eyePts[5]);
+    const v2 = dist(eyePts[2], eyePts[4]);
+    const h  = dist(eyePts[0], eyePts[3]);
+    return (v1 + v2) / (2.0 * h);
+  };
+
+  // Draw face mesh + landmark dots on overlay canvas
+  const drawFaceMesh = (detection, video) => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas || !video) return;
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!detection) return;
+
+    const pts = detection.landmarks.positions;
+
+    const connections = [
+      // Jawline
+      [0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],
+      [8,9],[9,10],[10,11],[11,12],[12,13],[13,14],[14,15],[15,16],
+      // Left eyebrow
+      [17,18],[18,19],[19,20],[20,21],
+      // Right eyebrow
+      [22,23],[23,24],[24,25],[25,26],
+      // Nose bridge
+      [27,28],[28,29],[29,30],
+      // Nose bottom
+      [30,31],[31,32],[32,33],[33,34],[34,35],
+      // Left eye
+      [36,37],[37,38],[38,39],[39,40],[40,41],[41,36],
+      // Right eye
+      [42,43],[43,44],[44,45],[45,46],[46,47],[47,42],
+      // Outer lips
+      [48,49],[49,50],[50,51],[51,52],[52,53],[53,54],
+      [54,55],[55,56],[56,57],[57,58],[58,59],[59,48],
+      // Inner lips
+      [60,61],[61,62],[62,63],[63,64],[64,65],[65,66],[66,67],[67,60],
+    ];
+
+    // Draw lines
+    ctx.strokeStyle = "rgba(0, 255, 170, 0.6)";
+    ctx.lineWidth = 1;
+    connections.forEach(([a, b]) => {
+      ctx.beginPath();
+      ctx.moveTo(pts[a].x, pts[a].y);
+      ctx.lineTo(pts[b].x, pts[b].y);
+      ctx.stroke();
+    });
+
+    // Draw dots
+    pts.forEach((pt) => {
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 2, 0, 2 * Math.PI);
+      ctx.fillStyle = "rgba(0, 255, 170, 0.9)";
+      ctx.fill();
+    });
+
+    // Highlight challenge region in yellow
+    const challengeColor = "rgba(255, 215, 0, 0.9)";
+    const challenge = CHALLENGES[challengeIndexRef.current];
+
+    if (challenge === "blink") {
+      [[36, 42], [42, 48]].forEach(([start, end]) => {
+        const eyePts = pts.slice(start, end);
+        ctx.beginPath();
+        eyePts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+        ctx.closePath();
+        ctx.strokeStyle = challengeColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
+    } else if (challenge === "smile" || challenge === "mouth_open") {
+      const mouthPts = pts.slice(48, 68);
+      ctx.beginPath();
+      mouthPts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+      ctx.strokeStyle = challengeColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    } else if (challenge === "turn_left" || challenge === "nod") {
+      // Highlight nose bridge
+      [27, 28, 29, 30].forEach((idx) => {
+        ctx.beginPath();
+        ctx.arc(pts[idx].x, pts[idx].y, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = challengeColor;
+        ctx.fill();
+      });
+    }
+  };
+
+  const markChallengeDone = (name) => {
+    const newCompleted = [...completedRef.current, name];
+    completedRef.current = newCompleted;
+    const nextIndex = challengeIndexRef.current + 1;
+    challengeIndexRef.current = nextIndex;
+
+    setCompletedChallenges([...newCompleted]);
+    setChallengeIndex(nextIndex);
+
+    if (nextIndex >= CHALLENGES.length) {
+      setLivenessLive(true);
+      setChallengeMsg("✅ Liveness confirmed! Auto-capturing...");
+      clearInterval(intervalRef.current);
+    } else {
+      setChallengeMsg(`✅ Done! Now: ${CHALLENGE_TEXT[CHALLENGES[nextIndex]]}`);
+    }
+  };
+
+  // Liveness detection loop — runs every 200ms via setInterval
+  const runLivenessLoop = useCallback(async () => {
+    if (isDetectingRef.current) return;
+    if (!videoRef.current || videoRef.current.readyState < 2) return;
+    if (challengeIndexRef.current >= CHALLENGES.length) return;
+
+    isDetectingRef.current = true;
+    const video = videoRef.current;
+
+    try {
+      const detection = await faceapi
+        .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
+        .withFaceLandmarks()
+        .withFaceExpressions();
+
+      // Always draw mesh regardless of challenge
+      drawFaceMesh(detection || null, video);
+
+      if (detection) {
+        const pts  = detection.landmarks.positions;
+        const expr = detection.expressions;
+        const challenge = CHALLENGES[challengeIndexRef.current];
+
+        if (challenge === "blink") {
+          const ear = (eyeAspectRatio(pts.slice(36, 42)) + eyeAspectRatio(pts.slice(42, 48))) / 2;
+          if (ear < 0.25) markChallengeDone("blink");
+
+        } else if (challenge === "turn_left") {
+          const noseTip   = pts[30];
+          const faceCenter = (pts[0].x + pts[16].x) / 2;
+          if (noseTip.x < faceCenter - 8) markChallengeDone("turn_left");
+
+        } else if (challenge === "nod") {
+          const noseTip  = pts[30];
+          const forehead = pts[27];
+          if (noseTip.y - forehead.y > 55) markChallengeDone("nod");
+
+        } else if (challenge === "smile") {
+          if (expr.happy > 0.55) markChallengeDone("smile");
+
+        } else if (challenge === "mouth_open") {
+          const upperLip = pts[62];
+          const lowerLip = pts[66];
+          if (Math.abs(upperLip.y - lowerLip.y) > 18) markChallengeDone("mouth_open");
+        }
+      } else {
+        // Clear mesh if no face
+        const canvas = overlayCanvasRef.current;
+        if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+      }
+    } catch (_) {}
+
+    isDetectingRef.current = false;
+  }, []);
 
   const handleFile = (f) => {
     if (!f || !f.type.startsWith("image/")) return;
@@ -41,97 +265,130 @@ const [stream, setStream] = useState(null);
   };
 
   const startCamera = async () => {
-  try {
-    const s = await navigator.mediaDevices.getUserMedia({ video: true });
-    setStream(s);
-    setShowCamera(true);
-    setTimeout(() => {
-      if (videoRef.current) videoRef.current.srcObject = s;
-    }, 100);
-  } catch {
-    setError("Camera access denied. Please allow camera permission.");
-  }
-};
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      setStream(s);
+      setShowCamera(true);
 
-const stopCamera = () => {
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  setStream(null);
-  setShowCamera(false);
-};
+      // Reset liveness
+      setChallengeIndex(0);
+      challengeIndexRef.current = 0;
+      setCompletedChallenges([]);
+      completedRef.current = [];
+      setLivenessLive(false);
+      setChallengeMsg(CHALLENGE_TEXT["blink"]);
 
-const takeSelfie = () => {
-  const canvas = canvasRef.current;
-  const video = videoRef.current;
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext("2d").drawImage(video, 0, 0);
-  canvas.toBlob((blob) => {
-    const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
-    handleFile(f);
-    stopCamera();
-  }, "image/jpeg");
-};
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = s;
+          videoRef.current.onloadedmetadata = () => {
+            if (modelsLoaded) {
+              intervalRef.current = setInterval(runLivenessLoop, 200);
+            }
+          };
+        }
+      }, 100);
+    } catch {
+      setError("Camera access denied. Please allow camera permission.");
+    }
+  };
+
+  const stopCamera = () => {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    clearInterval(intervalRef.current);
+    setStream(null);
+    setShowCamera(false);
+    setLivenessLive(false);
+    setChallengeIndex(0);
+    challengeIndexRef.current = 0;
+    setCompletedChallenges([]);
+    completedRef.current = [];
+    // Clear mesh canvas
+    const canvas = overlayCanvasRef.current;
+    if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+  };
+
+  const takeSelfie = () => {
+    const canvas  = canvasRef.current;
+    const video   = videoRef.current;
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+
+    // Flip horizontally to fix mirror effect
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob((blob) => {
+      const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
+      handleFile(f);
+      stopCamera();
+    }, "image/jpeg");
+  };
 
 
-  // Feature C: progress bar simulation during fetch
   const handleMatch = async () => {
-  if (!file) return;
-  setLoading(true);
-  setError(null);
-  setResults([]);
-  setProgress(0);
-
-  const interval = setInterval(() => {
-    setProgress((p) => {
-      if (p >= 90) { clearInterval(interval); return 90; }
-      return p + Math.random() * 12;
-    });
-  }, 300);
-
-  // Timeout after 30 seconds
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 30000);
-
-  const formData = new FormData();
-  formData.append("file", file);
-  formData.append("top_k", 10);
-
-  try {
-    const res = await fetch(`${API_URL}/match`, {
-      method: "POST",
-      body: formData,
-      signal: controller.signal,  // ← abort after 30s
-    });
-
-    clearTimeout(timeout);
-    const data = await res.json();
-
-    if (data.error) {
-      setError(data.error);
-      setProgress(0);           // ← reset progress on error
-    } else {
-      setResults(data.matches);
-      setProgress(100);         // ← complete progress
-    }
-
-  } catch (err) {
-    clearTimeout(timeout);
+    if (!file) return;
+    setLoading(true);
+    setError(null);
+    setResults([]);
     setProgress(0);
+    setGeoError(null);
 
-    if (err.name === "AbortError") {
-      setError("Request timed out. Backend is taking too long. Try again.");
-    } else {
-      setError("Cannot connect to backend. Make sure python api.py is running.");
+    const geo = await captureGeo();
+    setGeoData(geo);
+    if (!geo) setGeoError("⚠ Location unavailable — proceeding without geo.");
+
+    const interval = setInterval(() => {
+      setProgress((p) => {
+        if (p >= 90) { clearInterval(interval); return 90; }
+        return p + Math.random() * 12;
+      });
+    }, 300);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("top_k", 10);
+    if (geo) {
+      formData.append("geo_lat", geo.lat);
+      formData.append("geo_long", geo.long);
+      formData.append("geo_timestamp", geo.timestamp);
     }
 
-  } finally {
-    clearInterval(interval);
-    setLoading(false);          // ← THIS was missing — always stop loading
-  }
-};
+    try {
+      const res = await fetch(`${API_URL}/match`, {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
 
+      clearTimeout(timeout);
+      const data = await res.json();
+
+      if (data.error) {
+        setError(data.error);
+        setProgress(0);
+      } else {
+        setResults(data.matches);
+        setProgress(100);
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      setProgress(0);
+      if (err.name === "AbortError") {
+        setError("Request timed out. Try again.");
+      } else {
+        setError("Cannot connect to backend.");
+      }
+    } finally {
+      clearInterval(interval);
+      setLoading(false);
+    }
+  };
 
   const getColor = (score) => {
     if (score >= 0.90) return "#24aa4d";
@@ -156,7 +413,6 @@ const takeSelfie = () => {
         backgroundAttachment: "fixed",
       }}
     >
-      {/* Header: master-demo-header as background, header-master-demo on top */}
       <header className="fm-header-banner">
         <img src={masterDemoHeader} alt="" className="fm-header-bg" />
         <img src={headerMasterDemo} alt="Header" className="fm-header-logo" />
@@ -164,7 +420,6 @@ const takeSelfie = () => {
 
       <div className="fm-container">
 
-        {/* Header */}
         <div className="fm-header">
           <div className="fm-logo">⬡</div>
           <div>
@@ -202,13 +457,17 @@ const takeSelfie = () => {
           )}
         </div>
 
-        {/* Match + Take Selfie buttons — horizontal */}
+        {/* Geo tag display */}
+        {geoData && (
+          <div className="fm-geo-tag">
+            📍 {geoData.lat}, {geoData.long} &nbsp;|&nbsp; 🕐 {new Date(geoData.timestamp).toLocaleTimeString()}
+          </div>
+        )}
+        {geoError && <div className="fm-geo-error">{geoError}</div>}
+
+        {/* Buttons */}
         <div className="fm-btn-row">
-          <button
-            className="fm-btn"
-            onClick={handleMatch}
-            disabled={!file || loading}
-          >
+          <button className="fm-btn" onClick={handleMatch} disabled={!file || loading}>
             {loading ? <><span className="fm-spinner" /> Searching Faces...</> : "Find Matches"}
           </button>
           {!showCamera && (
@@ -218,7 +477,7 @@ const takeSelfie = () => {
           )}
         </div>
 
-        {/* Feature C: Progress Bar */}
+        {/* Progress Bar */}
         {loading && (
           <div className="fm-progress-wrapper">
             <div className="fm-progress-bar" style={{ width: `${Math.min(progress, 100)}%` }} />
@@ -232,142 +491,146 @@ const takeSelfie = () => {
             <img src={preview} alt="Scanning" className="fm-scan-img" />
             <div className="fm-scan-line" />
             <div className="fm-scan-corners">
-              <span className="corner tl" />
-              <span className="corner tr" />
-              <span className="corner bl" />
-              <span className="corner br" />
+              <span className="corner tl" /><span className="corner tr" />
+              <span className="corner bl" /><span className="corner br" />
             </div>
             <div className="fm-scan-label">Analyzing Face...</div>
           </div>
         )}
 
-{/* Camera View */}
-{showCamera && (
-  <div className="fm-camera-wrapper">
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      className="fm-camera-feed"
-    />
-    <canvas ref={canvasRef} hidden />
-    <div className="fm-camera-actions">
-      <button className="fm-capture-btn" onClick={takeSelfie}>
-        📸 Capture
-      </button>
-      <button className="fm-cancel-btn" onClick={stopCamera}>
-        ✕ Cancel
-      </button>
-    </div>
-    {/* Scanning overlay on camera */}
-    <div className="fm-scan-line" />
-    <div className="fm-scan-corners">
-      <span className="corner tl" />
-      <span className="corner tr" />
-      <span className="corner bl" />
-      <span className="corner br" />
-    </div>
-  </div>
-)}
+        {/* Camera View with Liveness + Mesh */}
+        {showCamera && (
+          <div className="fm-camera-wrapper">
+            <video ref={videoRef} autoPlay playsInline className="fm-camera-feed" />
 
+            {/* Face mesh overlay canvas */}
+            <canvas ref={overlayCanvasRef} className="fm-mesh-overlay" />
 
-        {/* Error */}
-        {error && <div className="fm-error">⚠ {error}</div>}
+            <canvas ref={canvasRef} hidden />
 
-        {/* Results — no slider */}
-        {results.length > 0 && (
-          <div className="fm-results">
-            <h2>Top {results.length} Matches</h2>
-            <div className="fm-grid">
-              {results
-                .map((match, i) => (
-                  <div
-                    className="fm-card"
-                    key={i}
-                    onClick={() => setSelectedImg(match)}  // Feature B: open modal
-                  >
-                    <div className="fm-rank">#{i + 1}</div>
-                    <div className="fm-card-img">
-  {match.images && match.images.length > 0 ? (
-    <>
-      {/* Multi photos grid — hidden on compare hover */}
-      <div className={`fm-multi-imgs ${hoverCardIndex === i ? "fm-img-hidden" : ""}`}>
-        {match.images.map((imgUrl, j) => (
-          <img
-            key={j}
-            src={imgUrl}
-            alt={`match-${j}`}
-            className="fm-multi-img"
-            onClick={(e) => {
-              e.stopPropagation();
-              setSelectedImg({ ...match, image_url: imgUrl });
-            }}
-          />
-        ))}
-      </div>
-
-      {/* Uploaded image shown on compare hover */}
-      <img
-        src={preview}
-        alt="Your upload"
-        className={`fm-img-uploaded ${hoverCardIndex === i ? "fm-img-visible" : ""}`}
-      />
-
-      {/* Compare button */}
-      <button
-        className="fm-compare-btn"
-        onMouseEnter={() => setHoverCardIndex(i)}
-        onMouseLeave={() => setHoverCardIndex(null)}
-        onClick={(e) => e.stopPropagation()}
-      >
-         Compare
-      </button>
-    </>
-  ) : (
-    <div className="fm-no-img">No Image</div>
-  )}
-</div>
-
-                    <div className="fm-card-body">
-                      <p className="fm-name">{match.label.replace(/_/g, " ")}</p>
-                      <div className="fm-bar-bg">
-                        <div
-                          className="fm-bar-fill"
-                          style={{
-                            width: `${Math.min(match.confidence * 100, 100)}%`,
-                            background: getColor(match.confidence),
-                          }}
-                        />
-                      </div>
-                      <div className="fm-score-row">
-                        <span
-                          className="fm-badge"
-                          style={{ background: getColor(match.confidence) }}
-                        >
-                          {getLabel(match.confidence)}
-                        </span>
-                        <span
-                          className="fm-score fm-score-highlight"
-                          style={{ color: getColor(match.confidence) }}
-                        >
-                          {(match.confidence * 100).toFixed(1)}%
-                        </span>
-                      </div>
-                    </div>
+            {/* Liveness Challenge Panel */}
+            <div className="fm-liveness-panel">
+              {!livenessLive ? (
+                <>
+                  <div className="fm-liveness-title">
+                    {modelsLoaded ? "🔍 Liveness Check" : "⏳ Loading models..."}
                   </div>
-                ))}
+                  <div className="fm-liveness-steps">
+                    {CHALLENGES.map((c, i) => (
+                      <div
+                        key={c}
+                        className={`fm-liveness-step ${
+                          completedChallenges.includes(c) ? "done" :
+                          i === challengeIndex ? "active" : "pending"
+                        }`}
+                      >
+                        {completedChallenges.includes(c) ? "✅" : i === challengeIndex ? "▶" : "○"}
+                        &nbsp;{CHALLENGE_TEXT[c]}
+                      </div>
+                    ))}
+                  </div>
+                  {challengeMsg && <div className="fm-liveness-msg">{challengeMsg}</div>}
+                </>
+              ) : (
+                <div className="fm-liveness-success">✅ Liveness Verified!</div>
+              )}
+            </div>
+
+            {/* Camera action buttons */}
+            <div className="fm-camera-actions">
+              {livenessLive && (
+                <button className="fm-capture-btn" onClick={takeSelfie}>
+                  📸 Capture
+                </button>
+              )}
+              <button className="fm-cancel-btn" onClick={stopCamera}>✕ Cancel</button>
+            </div>
+
+            <div className="fm-scan-line" />
+            <div className="fm-scan-corners">
+              <span className="corner tl" /><span className="corner tr" />
+              <span className="corner bl" /><span className="corner br" />
             </div>
           </div>
         )}
 
-        {/* Feature B: Enlarge Modal */}
+        {/* Error */}
+        {error && <div className="fm-error">⚠ {error}</div>}
+
+        {/* Results */}
+        {results.length > 0 && (
+          <div className="fm-results">
+            <h2>Top {results.length} Matches</h2>
+            <div className="fm-grid">
+              {results.map((match, i) => (
+                <div className="fm-card" key={i} onClick={() => setSelectedImg(match)}>
+                  <div className="fm-rank">#{i + 1}</div>
+                  <div className="fm-card-img">
+                    {match.images && match.images.length > 0 ? (
+                      <>
+                        <div className={`fm-multi-imgs ${hoverCardIndex === i ? "fm-img-hidden" : ""}`}>
+                          {match.images.map((imgUrl, j) => (
+                            <img
+                              key={j}
+                              src={imgUrl}
+                              alt={`match-${j}`}
+                              className="fm-multi-img"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedImg({ ...match, image_url: imgUrl });
+                              }}
+                            />
+                          ))}
+                        </div>
+                        <img
+                          src={preview}
+                          alt="Your upload"
+                          className={`fm-img-uploaded ${hoverCardIndex === i ? "fm-img-visible" : ""}`}
+                        />
+                        <button
+                          className="fm-compare-btn"
+                          onMouseEnter={() => setHoverCardIndex(i)}
+                          onMouseLeave={() => setHoverCardIndex(null)}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Compare
+                        </button>
+                      </>
+                    ) : (
+                      <div className="fm-no-img">No Image</div>
+                    )}
+                  </div>
+                  <div className="fm-card-body">
+                    <p className="fm-name">{match.label.replace(/_/g, " ")}</p>
+                    <div className="fm-bar-bg">
+                      <div
+                        className="fm-bar-fill"
+                        style={{
+                          width: `${Math.min(match.confidence * 100, 100)}%`,
+                          background: getColor(match.confidence),
+                        }}
+                      />
+                    </div>
+                    <div className="fm-score-row">
+                      <span className="fm-badge" style={{ background: getColor(match.confidence) }}>
+                        {getLabel(match.confidence)}
+                      </span>
+                      <span className="fm-score fm-score-highlight" style={{ color: getColor(match.confidence) }}>
+                        {(match.confidence * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Enlarge Modal */}
         {selectedImg && (
           <div className="fm-modal" onClick={() => setSelectedImg(null)}>
             <div className="fm-modal-box" onClick={(e) => e.stopPropagation()}>
-              <img
-                src={selectedImg.image_url}
-                alt="Match"
-              />
+              <img src={selectedImg.image_url} alt="Match" />
               <p style={{ color: getColor(selectedImg.confidence) }}>
                 {(selectedImg.confidence * 100).toFixed(1)}% Match
               </p>
@@ -381,7 +644,6 @@ const takeSelfie = () => {
 
       </div>
 
-      {/* Bargad branding: bottom right, fixed */}
       <div className="fm-footer-branding">
         <img src={bargadBranding} alt="Bargad" />
       </div>
