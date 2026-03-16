@@ -9,6 +9,13 @@ import { MapContainer, TileLayer, Marker } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+});
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 const CHALLENGES = ["turn_left", "nod", "smile", "mouth_open"];
@@ -31,12 +38,6 @@ export default function FaceMatch() {
   const [progress, setProgress] = useState(0);
   const [showCamera, setShowCamera] = useState(false);
   const [stream, setStream] = useState(null);
-  const baselineRef = useRef(null);      // stores baseline measurements
-  const earHistoryRef = useRef([]);      // used for baseline calibration
-  const noseYHistoryRef = useRef([]);    // nose Y over calibration for stable nod baseline
-  const noseCenterXHistoryRef = useRef([]); // nose X offset over calibration for stable turn_left baseline
-  const faceLostCountRef = useRef(0); 
-
 
   // Liveness + Geo states
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -48,14 +49,23 @@ export default function FaceMatch() {
   const [geoError, setGeoError] = useState(null);
   const [geoAddress, setGeoAddress] = useState(null);
 
+  // Refs
   const videoRef = useRef();
   const canvasRef = useRef();
   const overlayCanvasRef = useRef();
   const inputRef = useRef();
   const intervalRef = useRef(null);
+  const meshIntervalRef = useRef(null);
   const challengeIndexRef = useRef(0);
   const completedRef = useRef([]);
   const isDetectingRef = useRef(false);
+  const isMeshDetectingRef = useRef(false);
+  const baselineRef = useRef(null);
+  const noseYHistoryRef = useRef([]);
+  const noseCenterXHistoryRef = useRef([]);
+  const faceWidthHistoryRef = useRef([]);
+  const faceLostCountRef = useRef(0);
+  const challengeCooldownRef = useRef(false); // prevent double-firing
 
   // Load face-api models once
   useEffect(() => {
@@ -75,67 +85,43 @@ export default function FaceMatch() {
     load();
   }, []);
 
-  // Geo capture
+  // High accuracy geo capture
   const captureGeo = useCallback(() => {
-  return new Promise((resolve) => {
-    if (!navigator.geolocation) return resolve(null);
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve({
-        lat: pos.coords.latitude.toFixed(7),   // 7 decimal places = ~1cm accuracy
-        long: pos.coords.longitude.toFixed(7),
-        timestamp: new Date().toISOString(),
-      }),
-      () => resolve(null),
-      {
-        enableHighAccuracy: true,   // uses GPS chip, not WiFi/IP
-        maximumAge: 0,              // never use cached location
-        timeout: 12000,             // wait up to 12 seconds
-      }
-    );
-  });
-}, []);
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({
+          lat: pos.coords.latitude.toFixed(7),
+          long: pos.coords.longitude.toFixed(7),
+          timestamp: new Date().toISOString(),
+        }),
+        () => resolve(null),
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 12000 }
+      );
+    });
+  }, []);
 
-// Reverse geocode using Nominatim (free, no API key)
-// BigDataCloud — free, no API key, instant response
-const reverseGeocode = useCallback(async (lat, long) => {
-  try {
-    const res = await fetch(
-      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${long}&localityLanguage=en`
-    );
-    const data = await res.json();
+  // Reverse geocode — BigDataCloud (free, no key)
+  const reverseGeocode = useCallback(async (lat, long) => {
+    try {
+      const res = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${long}&localityLanguage=en`
+      );
+      const data = await res.json();
+      const parts = [data.locality, data.principalSubdivision, data.countryName].filter(Boolean);
+      return {
+        city: data.locality || data.city || "",
+        state: data.principalSubdivision || "",
+        country: data.countryName || "",
+        full: data.localityInfo?.administrative?.map((a) => a.name).filter(Boolean).join(", ") || parts.join(", "),
+        short: parts.join(", "),
+      };
+    } catch {
+      return null;
+    }
+  }, []);
 
-    const parts = [
-      data.locality,
-      data.principalSubdivision,
-      data.countryName,
-    ].filter(Boolean);
-
-    return {
-      city: data.locality || data.city || "",
-      state: data.principalSubdivision || "",
-      country: data.countryName || "",
-      full: data.localityInfo?.administrative
-        ?.map((a) => a.name)
-        .filter(Boolean)
-        .join(", ") || parts.join(", "),
-      short: parts.join(", "),
-    };
-  } catch {
-    return null;
-  }
-}, []);
-
-
-  // Eye Aspect Ratio (used in baseline calibration)
-  const eyeAspectRatio = (eyePts) => {
-    const dist = (a, b) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
-    const v1 = dist(eyePts[1], eyePts[5]);
-    const v2 = dist(eyePts[2], eyePts[4]);
-    const h  = dist(eyePts[0], eyePts[3]);
-    return (v1 + v2) / (2.0 * h);
-  };
-
-  // Draw face mesh + landmark dots on overlay canvas
+  // ── MESH DRAW (visual only) ──
   const drawFaceMesh = (detection, video) => {
     const canvas = overlayCanvasRef.current;
     if (!canvas || !video) return;
@@ -146,33 +132,22 @@ const reverseGeocode = useCallback(async (lat, long) => {
     if (!detection) return;
 
     const pts = detection.landmarks.positions;
-
     const connections = [
-      // Jawline
       [0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],
       [8,9],[9,10],[10,11],[11,12],[12,13],[13,14],[14,15],[15,16],
-      // Left eyebrow
       [17,18],[18,19],[19,20],[20,21],
-      // Right eyebrow
       [22,23],[23,24],[24,25],[25,26],
-      // Nose bridge
       [27,28],[28,29],[29,30],
-      // Nose bottom
       [30,31],[31,32],[32,33],[33,34],[34,35],
-      // Left eye
       [36,37],[37,38],[38,39],[39,40],[40,41],[41,36],
-      // Right eye
       [42,43],[43,44],[44,45],[45,46],[46,47],[47,42],
-      // Outer lips
       [48,49],[49,50],[50,51],[51,52],[52,53],[53,54],
       [54,55],[55,56],[56,57],[57,58],[58,59],[59,48],
-      // Inner lips
       [60,61],[61,62],[62,63],[63,64],[64,65],[65,66],[66,67],[67,60],
     ];
 
-    // Draw lines
-    ctx.strokeStyle = "rgba(0, 255, 170, 0.6)";
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(0, 255, 170, 0.65)";
+    ctx.lineWidth = 1.5;
     connections.forEach(([a, b]) => {
       ctx.beginPath();
       ctx.moveTo(pts[a].x, pts[a].y);
@@ -180,174 +155,165 @@ const reverseGeocode = useCallback(async (lat, long) => {
       ctx.stroke();
     });
 
-    // Draw dots
     pts.forEach((pt) => {
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 2, 0, 2 * Math.PI);
+      ctx.arc(pt.x, pt.y, 2.5, 0, 2 * Math.PI);
       ctx.fillStyle = "rgba(0, 255, 170, 0.9)";
       ctx.fill();
     });
 
-    // Highlight challenge region in yellow
+    // Yellow highlight on active challenge region
     const challengeColor = "rgba(255, 215, 0, 0.9)";
     const challenge = CHALLENGES[challengeIndexRef.current];
-
     if (challenge === "smile" || challenge === "mouth_open") {
-      const mouthPts = pts.slice(48, 68);
       ctx.beginPath();
-      mouthPts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+      pts.slice(48, 68).forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
       ctx.strokeStyle = challengeColor;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.stroke();
     } else if (challenge === "turn_left" || challenge === "nod") {
-      // Highlight nose bridge
       [27, 28, 29, 30].forEach((idx) => {
         ctx.beginPath();
-        ctx.arc(pts[idx].x, pts[idx].y, 4, 0, 2 * Math.PI);
+        ctx.arc(pts[idx].x, pts[idx].y, 5, 0, 2 * Math.PI);
         ctx.fillStyle = challengeColor;
         ctx.fill();
       });
     }
   };
 
+  // ── MESH LOOP — purely visual, slow 500ms ──
+  const runMeshLoop = useCallback(async () => {
+    if (isMeshDetectingRef.current) return;
+    if (!videoRef.current || videoRef.current.readyState < 2) return;
+    isMeshDetectingRef.current = true;
+    try {
+      const detection = await faceapi
+        .detectSingleFace(videoRef.current, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 }))
+        .withFaceLandmarks();
+      drawFaceMesh(detection || null, videoRef.current);
+    } catch (_) {}
+    isMeshDetectingRef.current = false;
+  }, []);
+
   const markChallengeDone = (name) => {
+    if (challengeCooldownRef.current) return; // prevent double fire
+    challengeCooldownRef.current = true;
+    setTimeout(() => { challengeCooldownRef.current = false; }, 1000);
+
     const newCompleted = [...completedRef.current, name];
     completedRef.current = newCompleted;
     const nextIndex = challengeIndexRef.current + 1;
     challengeIndexRef.current = nextIndex;
-
     setCompletedChallenges([...newCompleted]);
     setChallengeIndex(nextIndex);
 
     if (nextIndex >= CHALLENGES.length) {
       setLivenessLive(true);
-      setChallengeMsg("✅ Liveness confirmed! Auto-capturing...");
+      setChallengeMsg("✅ Liveness confirmed! Click Capture.");
       clearInterval(intervalRef.current);
+      clearInterval(meshIntervalRef.current);
     } else {
       setChallengeMsg(`✅ Done! Now: ${CHALLENGE_TEXT[CHALLENGES[nextIndex]]}`);
     }
   };
 
-  // Liveness detection loop — runs every 200ms via setInterval
+  // ── LIVENESS LOOP — detection only, no mesh, fast 150ms ──
   const runLivenessLoop = useCallback(async () => {
-  if (isDetectingRef.current) return;
-  if (!videoRef.current || videoRef.current.readyState < 2) return;
-  if (challengeIndexRef.current >= CHALLENGES.length) return;
+    if (isDetectingRef.current) return;
+    if (!videoRef.current || videoRef.current.readyState < 2) return;
+    if (challengeIndexRef.current >= CHALLENGES.length) return;
 
-  isDetectingRef.current = true;
-  const video = videoRef.current;
+    isDetectingRef.current = true;
+    const video = videoRef.current;
 
-  try {
-    const detection = await faceapi
-      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({
-        inputSize: 320,          // increased from 224 → more accurate
-        scoreThreshold: 0.35,
-      }))
-      .withFaceLandmarks()
-      .withFaceExpressions();
+    try {
+      const detection = await faceapi
+        .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({
+          inputSize: 320,
+          scoreThreshold: 0.3,
+        }))
+        .withFaceLandmarks()
+        .withFaceExpressions();
 
-    drawFaceMesh(detection || null, video);
+      if (detection) {
+        faceLostCountRef.current = 0;
+        const pts  = detection.landmarks.positions;
+        const expr = detection.expressions;
 
-    if (detection) {
-      faceLostCountRef.current = 0;
-      const pts  = detection.landmarks.positions;
-      const expr = detection.expressions;
+        // ── CALIBRATE BASELINE over 15 frames ──
+        if (!baselineRef.current) {
+          const faceCenterX = (pts[0].x + pts[16].x) / 2;
+          noseYHistoryRef.current.push(pts[30].y);
+          noseCenterXHistoryRef.current.push(pts[30].x - faceCenterX);
+          faceWidthHistoryRef.current.push(Math.abs(pts[16].x - pts[0].x));
 
-      // ── Step 1: Calibrate baseline on first detection ──
-      // Calibrate baseline over 10 frames, take average of best readings
-if (!baselineRef.current) {
-  const leftEAR  = eyeAspectRatio(pts.slice(36, 42));
-  const rightEAR = eyeAspectRatio(pts.slice(42, 48));
-  const ear = (leftEAR + rightEAR) / 2;
+          if (noseYHistoryRef.current.length >= 15) {
+            const sortedY  = [...noseYHistoryRef.current].sort((a, b) => a - b);
+            const sortedX  = [...noseCenterXHistoryRef.current].sort((a, b) => a - b);
+            const sortedFW = [...faceWidthHistoryRef.current].sort((a, b) => a - b);
+            const mid = Math.floor(sortedY.length / 2);
 
-  const faceCenterX = (pts[0].x + pts[16].x) / 2;
-  const noseOffsetX = pts[30].x - faceCenterX;
+            baselineRef.current = {
+              noseTipY:    sortedY[mid],
+              noseCenterX: sortedX[mid],
+              faceWidth:   sortedFW[mid],
+            };
+            noseYHistoryRef.current = [];
+            noseCenterXHistoryRef.current = [];
+            faceWidthHistoryRef.current = [];
+            console.log("✅ Baseline ready:", baselineRef.current);
+          } else {
+            console.log(`📊 Calibrating ${noseYHistoryRef.current.length}/15...`);
+          }
+          isDetectingRef.current = false;
+          return;
+        }
 
-  earHistoryRef.current.push(ear);
-  noseYHistoryRef.current.push(pts[30].y);
-  noseCenterXHistoryRef.current.push(noseOffsetX);
+        const base      = baselineRef.current;
+        const challenge = CHALLENGES[challengeIndexRef.current];
 
-  // Collect 10 frames then take MAX EAR and medians for stable baseline
-  if (earHistoryRef.current.length >= 10) {
-  const maxEAR = Math.max(...earHistoryRef.current);
-  const noseYSorted = [...noseYHistoryRef.current].sort((a, b) => a - b);
-  const medianNoseY = noseYSorted[Math.floor(noseYSorted.length / 2)];
-  const noseXSorted = [...noseCenterXHistoryRef.current].sort((a, b) => a - b);
-  const medianNoseCenterX = noseXSorted[Math.floor(noseXSorted.length / 2)];
+        if (challenge === "turn_left") {
+          const faceCenter = (pts[0].x + pts[16].x) / 2;
+          const noseOffset = pts[30].x - faceCenter;
+          const turnDelta  = base.noseCenterX - noseOffset;
+          const threshold  = base.faceWidth * 0.07; // very relaxed
+          console.log(`↩ turn: ${turnDelta.toFixed(1)} / need: ${threshold.toFixed(1)}`);
+          if (turnDelta > threshold) markChallengeDone("turn_left");
 
-  baselineRef.current = {
-    ear:         maxEAR,
-    noseCenterX: medianNoseCenterX,
-    noseTipY:    medianNoseY,
-    faceWidth:   Math.abs(pts[16].x - pts[0].x),
-  };
-  earHistoryRef.current = [];
-  noseYHistoryRef.current = [];
-  noseCenterXHistoryRef.current = [];
-  console.log("✅ Baseline calibrated:", baselineRef.current);
-}
-else {
-    console.log(`📊 Calibrating... ${earHistoryRef.current.length}/10 EAR: ${ear.toFixed(3)}`);
-  }
+        } else if (challenge === "nod") {
+          const nodDelta  = pts[30].y - base.noseTipY;
+          const threshold = Math.max(5, base.faceWidth * 0.05); // very relaxed
+          console.log(`↕ nod: ${nodDelta.toFixed(1)} / need: ${threshold.toFixed(1)}`);
+          if (nodDelta > threshold) markChallengeDone("nod");
 
-  isDetectingRef.current = false;
-  return;
-}
+        } else if (challenge === "smile") {
+          console.log(`😊 happy: ${expr.happy.toFixed(2)}`);
+          if (expr.happy > 0.40) markChallengeDone("smile");
 
+        } else if (challenge === "mouth_open") {
+          const mouthOpen = Math.abs(pts[62].y - pts[66].y);
+          const threshold = Math.max(4, base.faceWidth * 0.05);
+          console.log(`😮 mouth: ${mouthOpen.toFixed(1)} / need: ${threshold.toFixed(1)}`);
+          if (mouthOpen > threshold) markChallengeDone("mouth_open");
+        }
 
-      const base    = baselineRef.current;
-      const challenge = CHALLENGES[challengeIndexRef.current];
-
-      // ── HEAD TURN LEFT: nose moves left of center => delta positive ──
-      if (challenge === "turn_left") {
-  const faceCenter = (pts[0].x + pts[16].x) / 2;
-  const noseOffset = pts[30].x - faceCenter;
-  const delta = base.noseCenterX - noseOffset; // positive when head turned left (nose left of baseline)
-  const threshold = base.faceWidth * 0.08;    // 8% of face width — relaxed for demo
-
-  if (delta > threshold) markChallengeDone("turn_left");
-} else if (challenge === "nod") {
-  const currentNoseTipY = pts[30].y;
-  const nodDelta = currentNoseTipY - base.noseTipY; // positive = head tilted down
-  const threshold = Math.max(6, base.faceWidth * 0.06); // 6% of face width, min 6px — relaxed for demo
-
-  if (nodDelta > threshold) markChallengeDone("nod");
-
-      // ── SMILE: expression confidence ──
-      } else if (challenge === "smile") {
-        console.log(`😊 Happy: ${expr.happy.toFixed(2)}`);
-        if (expr.happy > 0.45) markChallengeDone("smile"); // relaxed from 0.60
-
-      // ── MOUTH OPEN: relative lip distance ──
-      } else if (challenge === "mouth_open") {
-        const mouthOpen = Math.abs(pts[62].y - pts[66].y);
-        const threshold = base.faceWidth * 0.06; // 6% — relaxed for demo
-        console.log(`😮 Mouth open: ${mouthOpen.toFixed(1)} / needed: ${threshold.toFixed(1)}`);
-        if (mouthOpen > threshold) markChallengeDone("mouth_open");
+      } else {
+        faceLostCountRef.current += 1;
+        if (faceLostCountRef.current > 15) {
+          baselineRef.current = null;
+          noseYHistoryRef.current = [];
+          noseCenterXHistoryRef.current = [];
+          faceWidthHistoryRef.current = [];
+          faceLostCountRef.current = 0;
+          console.log("🔄 Baseline reset — face lost too long");
+        }
       }
-
-    } else {
-    faceLostCountRef.current += 1;
-
-  // Only reset baseline if face missing for 10+ consecutive frames (1 second)
-  if (faceLostCountRef.current > 10) {
-    baselineRef.current = null;
-    earHistoryRef.current = [];
-    noseYHistoryRef.current = [];
-    noseCenterXHistoryRef.current = [];
-    faceLostCountRef.current = 0;
-  }
-      // No face — reset baseline so it recalibrates when face returns
-      const canvas = overlayCanvasRef.current;
-      if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    } catch (e) {
+      console.warn("Liveness error:", e);
     }
-  } catch (e) {
-    console.warn("Detection error:", e);
-  }
 
-  isDetectingRef.current = false;
-}, []);
-
+    isDetectingRef.current = false;
+  }, []);
 
   const handleFile = (f) => {
     if (!f || !f.type.startsWith("image/")) return;
@@ -363,28 +329,38 @@ else {
     handleFile(e.dataTransfer.files[0]);
   };
 
+  const resetLiveness = () => {
+    setChallengeIndex(0);
+    challengeIndexRef.current = 0;
+    setCompletedChallenges([]);
+    completedRef.current = [];
+    setLivenessLive(false);
+    setChallengeMsg(CHALLENGE_TEXT[CHALLENGES[0]]);
+    baselineRef.current = null;
+    noseYHistoryRef.current = [];
+    noseCenterXHistoryRef.current = [];
+    faceWidthHistoryRef.current = [];
+    faceLostCountRef.current = 0;
+    challengeCooldownRef.current = false;
+  };
+
   const startCamera = async () => {
+    if (!modelsLoaded) {
+      setError("⏳ Models still loading, wait 3 seconds and try again.");
+      return;
+    }
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true });
       setStream(s);
       setShowCamera(true);
-
-      // Reset liveness
-      setChallengeIndex(0);
-      challengeIndexRef.current = 0;
-      setCompletedChallenges([]);
-      completedRef.current = [];
-      setLivenessLive(false);
-      setChallengeMsg(CHALLENGE_TEXT[CHALLENGES[0]]);
-      faceLostCountRef.current = 0;  //
+      resetLiveness();
 
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = s;
           videoRef.current.onloadedmetadata = () => {
-            if (modelsLoaded) {
-              intervalRef.current = setInterval(runLivenessLoop, 100);
-            }
+            intervalRef.current     = setInterval(runLivenessLoop, 150);
+            meshIntervalRef.current = setInterval(runMeshLoop, 500);
           };
         }
       }, 100);
@@ -396,14 +372,10 @@ else {
   const stopCamera = () => {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     clearInterval(intervalRef.current);
+    clearInterval(meshIntervalRef.current);
     setStream(null);
     setShowCamera(false);
     setLivenessLive(false);
-    setChallengeIndex(0);
-    challengeIndexRef.current = 0;
-    setCompletedChallenges([]);
-    completedRef.current = [];
-    // Clear mesh canvas
     const canvas = overlayCanvasRef.current;
     if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
   };
@@ -414,11 +386,8 @@ else {
     canvas.width  = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
-
-    // Flip horizontally to fix mirror effect
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
-
     ctx.drawImage(video, 0, 0);
     canvas.toBlob((blob) => {
       const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
@@ -426,7 +395,6 @@ else {
       stopCamera();
     }, "image/jpeg");
   };
-
 
   const handleMatch = async () => {
     if (!file) return;
@@ -436,14 +404,14 @@ else {
     setProgress(0);
     setGeoError(null);
 
- const geo = await captureGeo();
-setGeoData(geo);
-setGeoAddress(null); // reset on each match
-if (!geo) {
-  setGeoError("⚠ Location unavailable — proceeding without geo.");
-} else {
-  reverseGeocode(geo.lat, geo.long).then((addr) => setGeoAddress(addr));
-}
+    const geo = await captureGeo();
+    setGeoData(geo);
+    setGeoAddress(null);
+    if (!geo) {
+      setGeoError("⚠ Location unavailable — proceeding without geo.");
+    } else {
+      reverseGeocode(geo.lat, geo.long).then((addr) => setGeoAddress(addr));
+    }
 
     const interval = setInterval(() => {
       setProgress((p) => {
@@ -470,10 +438,8 @@ if (!geo) {
         body: formData,
         signal: controller.signal,
       });
-
       clearTimeout(timeout);
       const data = await res.json();
-
       if (data.error) {
         setError(data.error);
         setProgress(0);
@@ -533,8 +499,9 @@ if (!geo) {
           </div>
         </div>
 
-        {/* Upload Box + when camera on: row with dropzone left (same size), camera right (same size), liveness beside camera; buttons only below dropzone */}
         <div className={showCamera ? "fm-upload-camera-row" : ""}>
+
+          {/* Left col — dropzone + buttons */}
           <div className="fm-left-col">
             <div
               className={`fm-dropzone ${dragging ? "active" : ""} ${preview ? "has-preview" : ""}`}
@@ -563,7 +530,7 @@ if (!geo) {
                 </div>
               )}
             </div>
-            {/* Buttons only below drag & drop */}
+
             <div className="fm-btn-row">
               <button className="fm-btn" onClick={handleMatch} disabled={!file || loading}>
                 {loading ? <><span className="fm-spinner" /> Searching Faces...</> : "Find Matches"}
@@ -574,6 +541,7 @@ if (!geo) {
             </div>
           </div>
 
+          {/* Right col — camera + liveness panel */}
           {showCamera && (
             <div className="fm-right-col">
               <div className="fm-camera-outer">
@@ -587,10 +555,7 @@ if (!geo) {
                         📸 Capture
                       </button>
                     )}
-                    <button className="fm-cancel-btn" onClick={stopCamera}>✕ Cancel</button>
                   </div>
-                </div>
-                <div className="fm-scan-frame">
                   <div className="fm-scan-line" />
                   <div className="fm-scan-corners">
                     <span className="corner tl" /><span className="corner tr" />
@@ -598,6 +563,8 @@ if (!geo) {
                   </div>
                 </div>
               </div>
+
+              {/* Liveness panel beside camera */}
               <div className="fm-liveness-panel fm-liveness-beside">
                 {!livenessLive ? (
                   <>
@@ -621,60 +588,52 @@ if (!geo) {
                     {challengeMsg && <div className="fm-liveness-msg">{challengeMsg}</div>}
                   </>
                 ) : (
-                  <div className="fm-liveness-success">✅ Liveness Verified!</div>
+                  <div className="fm-liveness-success">✅ Liveness Verified!<br />Click 📸 Capture</div>
                 )}
               </div>
             </div>
           )}
         </div>
 
-        {/* Geo tag display */}
-        {/* GPS Map Camera style geo tag */}
-{geoData && (
-  <div className="fm-geo-card">
-
-    {/* Left: Leaflet Map */}
-    <div className="fm-geo-map">
-      <MapContainer
-        center={[parseFloat(geoData.lat), parseFloat(geoData.long)]}
-        zoom={16}
-        style={{ width: "120px", height: "110px" }}
-        zoomControl={false}
-        dragging={false}
-        scrollWheelZoom={false}
-        doubleClickZoom={false}
-        attributionControl={false}
-      >
-        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-        <Marker position={[parseFloat(geoData.lat), parseFloat(geoData.long)]} />
-      </MapContainer>
-    </div>
-
-    {/* Right: Address */}
-    <div className="fm-geo-details">
-      <div className="fm-geo-city">
-        📍 {geoAddress ? geoAddress.short : "Fetching address..."} 🇮🇳
-      </div>
-      {geoAddress?.full && (
-        <div className="fm-geo-full-address">{geoAddress.full}</div>
-      )}
-      <div className="fm-geo-coords">
-        Lat {parseFloat(geoData.lat).toFixed(6)}° &nbsp; Long {parseFloat(geoData.long).toFixed(6)}°
-      </div>
-      <div className="fm-geo-time">
-        {new Date(geoData.timestamp).toLocaleString("en-IN", {
-          weekday: "long", day: "2-digit", month: "2-digit",
-          year: "numeric", hour: "2-digit", minute: "2-digit",
-          timeZoneName: "short",
-        })}
-      </div>
-    </div>
-
-  </div>
-)}
-{geoError && <div className="fm-geo-error">{geoError}</div>}
-
-
+        {/* Geo card */}
+        {geoData && (
+          <div className="fm-geo-card">
+            <div className="fm-geo-map">
+              <MapContainer
+                center={[parseFloat(geoData.lat), parseFloat(geoData.long)]}
+                zoom={16}
+                style={{ width: "120px", height: "110px" }}
+                zoomControl={false}
+                dragging={false}
+                scrollWheelZoom={false}
+                doubleClickZoom={false}
+                attributionControl={false}
+              >
+                <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                <Marker position={[parseFloat(geoData.lat), parseFloat(geoData.long)]} />
+              </MapContainer>
+            </div>
+            <div className="fm-geo-details">
+              <div className="fm-geo-city">
+                📍 {geoAddress ? geoAddress.short : "Fetching address..."} 🇮🇳
+              </div>
+              {geoAddress?.full && (
+                <div className="fm-geo-full-address">{geoAddress.full}</div>
+              )}
+              <div className="fm-geo-coords">
+                Lat {parseFloat(geoData.lat).toFixed(6)}° &nbsp; Long {parseFloat(geoData.long).toFixed(6)}°
+              </div>
+              <div className="fm-geo-time">
+                {new Date(geoData.timestamp).toLocaleString("en-IN", {
+                  weekday: "long", day: "2-digit", month: "2-digit",
+                  year: "numeric", hour: "2-digit", minute: "2-digit",
+                  timeZoneName: "short",
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+        {geoError && <div className="fm-geo-error">{geoError}</div>}
 
         {/* Progress Bar */}
         {loading && (
@@ -697,7 +656,6 @@ if (!geo) {
           </div>
         )}
 
-        {/* Error */}
         {error && <div className="fm-error">⚠ {error}</div>}
 
         {/* Results */}
@@ -713,31 +671,19 @@ if (!geo) {
                       <>
                         <div className={`fm-multi-imgs ${hoverCardIndex === i ? "fm-img-hidden" : ""}`}>
                           {match.images.map((imgUrl, j) => (
-                            <img
-                              key={j}
-                              src={imgUrl}
-                              alt={`match-${j}`}
-                              className="fm-multi-img"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedImg({ ...match, image_url: imgUrl });
-                              }}
+                            <img key={j} src={imgUrl} alt={`match-${j}`} className="fm-multi-img"
+                              onClick={(e) => { e.stopPropagation(); setSelectedImg({ ...match, image_url: imgUrl }); }}
                             />
                           ))}
                         </div>
-                        <img
-                          src={preview}
-                          alt="Your upload"
+                        <img src={preview} alt="Your upload"
                           className={`fm-img-uploaded ${hoverCardIndex === i ? "fm-img-visible" : ""}`}
                         />
-                        <button
-                          className="fm-compare-btn"
+                        <button className="fm-compare-btn"
                           onMouseEnter={() => setHoverCardIndex(i)}
                           onMouseLeave={() => setHoverCardIndex(null)}
                           onClick={(e) => e.stopPropagation()}
-                        >
-                          Compare
-                        </button>
+                        >Compare</button>
                       </>
                     ) : (
                       <div className="fm-no-img">No Image</div>
@@ -746,12 +692,8 @@ if (!geo) {
                   <div className="fm-card-body">
                     <p className="fm-name">{match.label.replace(/_/g, " ")}</p>
                     <div className="fm-bar-bg">
-                      <div
-                        className="fm-bar-fill"
-                        style={{
-                          width: `${Math.min(match.confidence * 100, 100)}%`,
-                          background: getColor(match.confidence),
-                        }}
+                      <div className="fm-bar-fill"
+                        style={{ width: `${Math.min(match.confidence * 100, 100)}%`, background: getColor(match.confidence) }}
                       />
                     </div>
                     <div className="fm-score-row">
@@ -769,7 +711,6 @@ if (!geo) {
           </div>
         )}
 
-        {/* Enlarge Modal */}
         {selectedImg && (
           <div className="fm-modal" onClick={() => setSelectedImg(null)}>
             <div className="fm-modal-box" onClick={(e) => e.stopPropagation()}>
@@ -778,9 +719,7 @@ if (!geo) {
                 {(selectedImg.confidence * 100).toFixed(1)}% Match
               </p>
               <span className="fm-modal-label">{selectedImg.label.replace(/_/g, " ")}</span>
-              <button className="fm-modal-close" onClick={() => setSelectedImg(null)}>
-                ✕ Close
-              </button>
+              <button className="fm-modal-close" onClick={() => setSelectedImg(null)}>✕ Close</button>
             </div>
           </div>
         )}
