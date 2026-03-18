@@ -381,20 +381,23 @@ export default function FaceMatch() {
   };
 
   const takeSelfie = () => {
-    const canvas  = canvasRef.current;
-    const video   = videoRef.current;
-    canvas.width  = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    ctx.translate(canvas.width, 0);
-    ctx.scale(-1, 1);
-    ctx.drawImage(video, 0, 0);
-    canvas.toBlob((blob) => {
-      const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
-      handleFile(f);
-      stopCamera();
-    }, "image/jpeg");
-  };
+  const canvas  = canvasRef.current;
+  const video   = videoRef.current;
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d");
+
+  // ❌ Remove flip — test without it first
+  // ctx.translate(canvas.width, 0);
+  // ctx.scale(-1, 1);
+
+  ctx.drawImage(video, 0, 0);
+  canvas.toBlob((blob) => {
+    const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
+    handleFile(f);
+    stopCamera();
+  }, "image/jpeg");
+};
 
   const handleMatch = async () => {
     if (!file) return;
