@@ -194,7 +194,10 @@ body {
   align-self: stretch;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
 }
 
 /* Dropzone */
@@ -781,16 +784,17 @@ body {
   padding: 10px 18px;
   z-index: 10;
   min-width: 280px;
-  text-align: center;
+  text-align: left;
+  box-sizing: border-box;
 }
-.fm-liveness-title { color: #fff; font-weight: 700; margin-bottom: 8px; }
-.fm-liveness-steps { display: flex; flex-direction: column; gap: 6px; }
-.fm-liveness-step { font-size: 13px; padding: 4px 8px; border-radius: 6px; }
+.fm-liveness-title { color: #fff; font-weight: 700; margin-bottom: 8px; text-align: left; width: 100%; }
+.fm-liveness-steps { display: flex; flex-direction: column; gap: 6px; align-items: stretch; width: 100%; }
+.fm-liveness-step { font-size: 13px; padding: 4px 8px; border-radius: 6px; text-align: left; }
 .fm-liveness-step.active  { color: #FFD700; background: rgba(255,215,0,0.15); }
 .fm-liveness-step.done    { color: #24aa4d; background: rgba(36,170,77,0.15); }
 .fm-liveness-step.pending { color: #888; }
-.fm-liveness-msg     { font-size: 12px; color: #ccc; margin-top: 6px; }
-.fm-liveness-success { color: #24aa4d; font-size: 16px; font-weight: 700; padding: 8px; }
+.fm-liveness-msg     { font-size: 12px; color: #ccc; margin-top: 6px; text-align: left; width: 100%; }
+.fm-liveness-success { color: #24aa4d; font-size: 16px; font-weight: 700; padding: 8px; text-align: left; width: 100%; }
 
 
 /* Face mesh overlay */
@@ -826,16 +830,17 @@ body {
   padding: 10px 18px;
   z-index: 10;
   min-width: 280px;
-  text-align: center;
+  text-align: left;
+  box-sizing: border-box;
 }
-.fm-liveness-title   { color: #fff; font-weight: 700; margin-bottom: 8px; }
-.fm-liveness-steps   { display: flex; flex-direction: column; gap: 6px; }
-.fm-liveness-step    { font-size: 13px; padding: 4px 8px; border-radius: 6px; }
+.fm-liveness-title   { color: #fff; font-weight: 700; margin-bottom: 8px; text-align: left; width: 100%; }
+.fm-liveness-steps   { display: flex; flex-direction: column; gap: 6px; align-items: stretch; width: 100%; }
+.fm-liveness-step    { font-size: 13px; padding: 4px 8px; border-radius: 6px; text-align: left; }
 .fm-liveness-step.active  { color: #FFD700; background: rgba(255,215,0,0.15); }
 .fm-liveness-step.done    { color: #24aa4d; background: rgba(36,170,77,0.15); }
 .fm-liveness-step.pending { color: #888; }
-.fm-liveness-msg     { font-size: 12px; color: #ccc; margin-top: 6px; }
-.fm-liveness-success { color: #24aa4d; font-size: 16px; font-weight: 700; padding: 8px; }
+.fm-liveness-msg     { font-size: 12px; color: #ccc; margin-top: 6px; text-align: left; width: 100%; }
+.fm-liveness-success { color: #24aa4d; font-size: 16px; font-weight: 700; padding: 8px; text-align: left; width: 100%; }
 
 
 /* GPS Map Camera style geo card */
