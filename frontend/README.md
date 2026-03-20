@@ -1,5 +1,12 @@
 # React + Vite
 
+## Backend API URL
+
+Production builds read `VITE_API_URL` from `.env.production` (default: `https://facematch-test.onrender.com`).  
+If you deploy the frontend on **Vercel** (or similar), set the same variable in the host’s environment so the build embeds the correct API base URL.
+
+---
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

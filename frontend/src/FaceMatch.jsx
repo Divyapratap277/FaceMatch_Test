@@ -17,6 +17,8 @@ L.Icon.Default.mergeOptions({
 });
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+/** Match API can be slow (Render cold start, large DB scan). */
+const MATCH_REQUEST_TIMEOUT_MS = 120_000; // 2 minutes
 
 const CHALLENGES = ["turn_left", "nod", "smile", "mouth_open"];
 const CHALLENGE_TEXT = {
@@ -424,7 +426,7 @@ export default function FaceMatch() {
     }, 300);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), MATCH_REQUEST_TIMEOUT_MS);
 
     const formData = new FormData();
     formData.append("file", file);
