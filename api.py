@@ -15,6 +15,8 @@ load_dotenv()
 
 app = FastAPI()
 
+# CORS: browsers require Access-Control-Allow-Origin on cross-origin fetch.
+# Explicit list + regex covers facematch / any *.bargad.ai HTTPS (Railway + Vercel + local).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -24,6 +26,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:3000",
     ],
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)*bargad\.ai$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
