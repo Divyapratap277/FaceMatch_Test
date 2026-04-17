@@ -16,7 +16,7 @@ body {
 .fm-page {
   min-height: 100vh;
   padding: 40px 20px;
-  padding-top: calc(108px + 40px); /* space for fixed header */
+  padding-top: calc(76px + 40px); /* space for fixed header */
   background-color: #000000;
 }
 
@@ -40,12 +40,15 @@ body {
   left: 0;
   right: 0;
   width: 100%;
-  height: 108px;
+  height: 76px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   padding-left: 20px;
+  padding-right: 16px;
   box-sizing: border-box;
-  overflow: hidden;
+  overflow: visible;
   z-index: 100;
   background-color: #0f3d24; /* dark green header */
 }
@@ -53,13 +56,84 @@ body {
 .fm-header-logo {
   position: relative;
   z-index: 1;
-  max-width: min(340px, 62vw);
-  max-height: 84px;
+  max-width: min(260px, 50vw);
+  max-height: 52px;
   width: auto;
   height: auto;
   display: block;
   object-fit: contain;
   object-position: left center;
+  flex-shrink: 0;
+}
+
+/* Profile menu — top right */
+.fm-header-profile {
+  position: relative;
+  flex-shrink: 0;
+  z-index: 101;
+}
+
+.fm-profile-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.25);
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s, border-color 0.2s;
+}
+.fm-profile-btn:hover {
+  background: rgba(0, 0, 0, 0.4);
+  border-color: rgba(36, 170, 77, 0.5);
+}
+
+.fm-profile-chevron {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.fm-profile-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 160px;
+  padding: 6px;
+  border-radius: 12px;
+  background: #0f1419;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+
+.fm-profile-email {
+  padding: 8px 10px 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  word-break: break-all;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 4px;
+}
+
+.fm-profile-logout {
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #fecaca;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.fm-profile-logout:hover {
+  background: rgba(255, 0, 0, 0.12);
 }
 
 /* Bargad branding: bottom right of page, fixed */

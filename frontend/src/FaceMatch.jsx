@@ -26,7 +26,7 @@ const CHALLENGE_TEXT = {
   mouth_open: "😮 OPEN your mouth wide",
 };
 
-export default function FaceMatch() {
+export default function FaceMatch({ userEmail, onLogout }) {
   const [preview, setPreview] = useState(null);
   const [file, setFile] = useState(null);
   const [results, setResults] = useState([]);
@@ -48,6 +48,8 @@ export default function FaceMatch() {
   const [geoData, setGeoData] = useState(null);
   const [geoError, setGeoError] = useState(null);
   const [geoAddress, setGeoAddress] = useState(null);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef(null);
 
   // Refs
   const videoRef = useRef();
@@ -84,6 +86,16 @@ export default function FaceMatch() {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    const onDocMouseDown = (e) => {
+      const el = profileMenuRef.current;
+      if (el && !el.contains(e.target)) setProfileMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [profileMenuOpen]);
 
   // High accuracy geo capture
   const captureGeo = useCallback(() => {
@@ -480,6 +492,40 @@ export default function FaceMatch() {
     <div className="fm-page">
       <header className="fm-header-banner">
         <img src={bargadLogo} alt="Bargad" className="fm-header-logo" />
+        <div className="fm-header-profile" ref={profileMenuRef}>
+          <button
+            type="button"
+            className="fm-profile-btn"
+            onClick={() => setProfileMenuOpen((o) => !o)}
+            aria-expanded={profileMenuOpen}
+            aria-haspopup="true"
+          >
+            Profile
+            <span className="fm-profile-chevron" aria-hidden>
+              {profileMenuOpen ? "▲" : "▼"}
+            </span>
+          </button>
+          {profileMenuOpen && (
+            <div className="fm-profile-dropdown" role="menu">
+              {userEmail ? (
+                <div className="fm-profile-email" title={userEmail}>
+                  {userEmail}
+                </div>
+              ) : null}
+              <button
+                type="button"
+                className="fm-profile-logout"
+                role="menuitem"
+                onClick={() => {
+                  setProfileMenuOpen(false);
+                  onLogout?.();
+                }}
+              >
+                Logout
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       <div className={`fm-container ${showCamera ? "fm-container-wide" : ""}`}>
