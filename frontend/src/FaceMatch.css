@@ -2,6 +2,7 @@
 
 html, #root {
   min-height: 100vh;
+  background-color: #000000;
 }
 
 /* Project palette: #24aa4d #5edd7c #ff0000 #ffbf01 #930303 */
@@ -9,12 +10,14 @@ body {
   min-height: 100vh;
   font-family: 'Segoe UI', sans-serif;
   color: #e2e8f0;
+  background-color: #000000;
 }
 
 .fm-page {
   min-height: 100vh;
   padding: 40px 20px;
-  padding-top: calc(92px + 40px); /* space for fixed header */
+  padding-top: calc(108px + 40px); /* space for fixed header */
+  background-color: #000000;
 }
 
 .fm-container {
@@ -37,21 +40,21 @@ body {
   left: 0;
   right: 0;
   width: 100%;
-  height: 92px;
+  height: 108px;
   display: flex;
   align-items: center;
   padding-left: 20px;
   box-sizing: border-box;
   overflow: hidden;
   z-index: 100;
-  background-color: #24aa4d;
+  background-color: #0f3d24; /* dark green header */
 }
 
 .fm-header-logo {
   position: relative;
   z-index: 1;
-  max-width: min(280px, 55vw);
-  max-height: 64px;
+  max-width: min(340px, 62vw);
+  max-height: 84px;
   width: auto;
   height: auto;
   display: block;

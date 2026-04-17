@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import * as faceapi from "face-api.js";
 import "./FaceMatch.css";
-import mainBg from "./Main background.svg?url";
 import bargadLogo from "./bargad-logo.png";
 import bargadBranding from "./bargad-branding (1).svg?url";
 import { MapContainer, TileLayer, Marker } from "react-leaflet";
@@ -478,16 +477,7 @@ export default function FaceMatch() {
   };
 
   return (
-    <div
-      className="fm-page"
-      style={{
-        backgroundImage: `url(${mainBg})`,
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-        backgroundRepeat: "no-repeat",
-        backgroundAttachment: "fixed",
-      }}
-    >
+    <div className="fm-page">
       <header className="fm-header-banner">
         <img src={bargadLogo} alt="Bargad" className="fm-header-logo" />
       </header>
