@@ -18,13 +18,71 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 /** Match API can be slow (Render cold start, large DB scan). */
 const MATCH_REQUEST_TIMEOUT_MS = 30_000;
 
-const CHALLENGES = ["turn_left", "nod", "smile", "mouth_open"];
+const DEVICE_KEY = "facematch_device_id";
+const SUSTAINED_FRAMES = 4;
+
+/** Gesture ids are issued by the server; labels here must stay in sync with `ALL_GESTURE_IDS` in api.py. */
 const CHALLENGE_TEXT = {
-  turn_left:  "↩️ Turn your head LEFT",
-  nod:        "↕️ NOD your head down",
-  smile:      "😊 Please SMILE",
+  turn_left: "↩️ Turn your head LEFT",
+  turn_right: "↪️ Turn your head RIGHT",
+  nod: "↕️ NOD your head down",
+  look_up: "⬆️ LOOK slightly up",
+  smile: "😊 Please SMILE",
+  surprised: "😲 Look SURPRISED",
   mouth_open: "😮 OPEN your mouth wide",
+  blink: "😑 BLINK both eyes once",
+  tilt_head: "↔️ TILT head toward one shoulder (ear line)",
+  angry: "😠 Make an ANGRY / frowning face",
 };
+
+function getOrCreateDeviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(DEVICE_KEY, id);
+    }
+    return id;
+  } catch {
+    return `anon_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  }
+}
+
+function landmarkEAR(pts, startIdx) {
+  const p = (i) => pts[startIdx + i];
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const v1 = dist(p(1), p(5));
+  const v2 = dist(p(2), p(4));
+  const h = dist(p(0), p(3));
+  return (v1 + v2) / (2 * h + 1e-6);
+}
+
+function eyeTiltAngleRad(pts) {
+  return Math.atan2(pts[45].y - pts[36].y, pts[45].x - pts[36].x);
+}
+
+/** Smallest absolute difference between two orientations (radians). */
+function headTiltDeltaRad(current, baseline) {
+  let d = current - baseline;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return Math.abs(d);
+}
+
+async function captureBurstFromVideo(video, count, delayMs) {
+  const c = document.createElement("canvas");
+  c.width = video.videoWidth;
+  c.height = video.videoHeight;
+  const ctx = c.getContext("2d");
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    ctx.drawImage(video, 0, 0);
+    const blob = await new Promise((res) => c.toBlob((b) => res(b), "image/jpeg", 0.52));
+    if (blob) out.push(blob);
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return out;
+}
 
 function UserAvatarIcon() {
   return (
@@ -67,6 +125,9 @@ export default function FaceMatch({ userEmail, onLogout }) {
   const [geoAddress, setGeoAddress] = useState(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const profileMenuRef = useRef(null);
+  const [sessionChallenges, setSessionChallenges] = useState([]);
+  const [livenessSessionLoading, setLivenessSessionLoading] = useState(false);
+  const [canMatch, setCanMatch] = useState(false);
 
   // Refs
   const videoRef = useRef();
@@ -83,8 +144,17 @@ export default function FaceMatch({ userEmail, onLogout }) {
   const noseYHistoryRef = useRef([]);
   const noseCenterXHistoryRef = useRef([]);
   const faceWidthHistoryRef = useRef([]);
+  const calEyeAngRef = useRef([]);
+  const calLeftEarRef = useRef([]);
+  const calRightEarRef = useRef([]);
   const faceLostCountRef = useRef(0);
   const challengeCooldownRef = useRef(false); // prevent double-firing
+  const sessionChallengesRef = useRef([]);
+  const livenessSessionIdRef = useRef(null);
+  const livenessCompletedRef = useRef(false);
+  const sustainCountRef = useRef(0);
+  const blinkSawLowRef = useRef(false);
+  const postVerifyRunningRef = useRef(false);
 
   // Load face-api models once
   useEffect(() => {
@@ -193,17 +263,37 @@ export default function FaceMatch({ userEmail, onLogout }) {
 
     // Yellow highlight on active challenge region
     const challengeColor = "rgba(255, 215, 0, 0.9)";
-    const challenge = CHALLENGES[challengeIndexRef.current];
-    if (challenge === "smile" || challenge === "mouth_open") {
+    const list = sessionChallengesRef.current;
+    const challenge = list[challengeIndexRef.current];
+    if (challenge === "smile" || challenge === "surprised" || challenge === "angry" || challenge === "mouth_open") {
       ctx.beginPath();
-      pts.slice(48, 68).forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+      pts.slice(48, 68).forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
       ctx.strokeStyle = challengeColor;
       ctx.lineWidth = 2.5;
       ctx.stroke();
-    } else if (challenge === "turn_left" || challenge === "nod") {
+    } else if (
+      challenge === "turn_left" ||
+      challenge === "turn_right" ||
+      challenge === "nod" ||
+      challenge === "look_up"
+    ) {
       [27, 28, 29, 30].forEach((idx) => {
         ctx.beginPath();
         ctx.arc(pts[idx].x, pts[idx].y, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = challengeColor;
+        ctx.fill();
+      });
+    } else if (challenge === "tilt_head") {
+      ctx.beginPath();
+      ctx.moveTo(pts[36].x, pts[36].y);
+      ctx.lineTo(pts[45].x, pts[45].y);
+      ctx.strokeStyle = challengeColor;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    } else if (challenge === "blink") {
+      [36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47].forEach((idx) => {
+        ctx.beginPath();
+        ctx.arc(pts[idx].x, pts[idx].y, 3.5, 0, 2 * Math.PI);
         ctx.fillStyle = challengeColor;
         ctx.fill();
       });
@@ -224,10 +314,16 @@ export default function FaceMatch({ userEmail, onLogout }) {
     isMeshDetectingRef.current = false;
   }, []);
 
-  const markChallengeDone = (name) => {
-    if (challengeCooldownRef.current) return; // prevent double fire
+  const markChallengeDoneRef = useRef(() => {});
+  markChallengeDoneRef.current = (name) => {
+    if (challengeCooldownRef.current) return;
     challengeCooldownRef.current = true;
-    setTimeout(() => { challengeCooldownRef.current = false; }, 1000);
+    setTimeout(() => {
+      challengeCooldownRef.current = false;
+    }, 1000);
+
+    sustainCountRef.current = 0;
+    blinkSawLowRef.current = false;
 
     const newCompleted = [...completedRef.current, name];
     completedRef.current = newCompleted;
@@ -236,13 +332,95 @@ export default function FaceMatch({ userEmail, onLogout }) {
     setCompletedChallenges([...newCompleted]);
     setChallengeIndex(nextIndex);
 
-    if (nextIndex >= CHALLENGES.length) {
-      setLivenessLive(true);
-      setChallengeMsg("✅ Liveness confirmed! Click Capture.");
+    const total = sessionChallengesRef.current.length;
+    if (nextIndex >= total) {
       clearInterval(intervalRef.current);
       clearInterval(meshIntervalRef.current);
+      intervalRef.current = null;
+      meshIntervalRef.current = null;
+      if (!postVerifyRunningRef.current && livenessSessionIdRef.current) {
+        postVerifyRunningRef.current = true;
+        setChallengeMsg("Verifying motion…");
+        (async () => {
+          try {
+            const deviceId = getOrCreateDeviceId();
+            const video = videoRef.current;
+            if (!video || video.readyState < 2) {
+              setError("Video not ready for verification.");
+              postVerifyRunningRef.current = false;
+              return;
+            }
+            const blobs = await captureBurstFromVideo(video, 6, 130);
+            const fd = new FormData();
+            fd.append("session_id", livenessSessionIdRef.current);
+            fd.append("device_id", deviceId);
+            blobs.forEach((b) => fd.append("files", b, "frame.jpg"));
+            const tr = await fetch(`${API_URL}/liveness/temporal`, { method: "POST", body: fd });
+            const tj = await tr.json().catch(() => ({}));
+            if (!tr.ok || !tj.ok) {
+              setError(
+                typeof tj.detail === "string"
+                  ? tj.detail
+                  : "Motion/replay check failed. Please try again (use live camera, not a screen recording)."
+              );
+              postVerifyRunningRef.current = false;
+              const media = videoRef.current?.srcObject;
+              if (media && "getTracks" in media) media.getTracks().forEach((t) => t.stop());
+              setStream(null);
+              setShowCamera(false);
+              setSessionChallenges([]);
+              sessionChallengesRef.current = [];
+              livenessSessionIdRef.current = null;
+              livenessCompletedRef.current = false;
+              setCanMatch(false);
+              return;
+            }
+            const cr = await fetch(`${API_URL}/liveness/session/complete`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: livenessSessionIdRef.current }),
+            });
+            if (!cr.ok) {
+              const ej = await cr.json().catch(() => ({}));
+              setError(typeof ej.detail === "string" ? ej.detail : "Could not complete liveness session.");
+              postVerifyRunningRef.current = false;
+              setCanMatch(false);
+              const media2 = videoRef.current?.srcObject;
+              if (media2 && "getTracks" in media2) media2.getTracks().forEach((t) => t.stop());
+              setStream(null);
+              setShowCamera(false);
+              return;
+            }
+            livenessCompletedRef.current = true;
+            setCanMatch(true);
+            setLivenessLive(true);
+            setChallengeMsg("✅ Liveness confirmed! Click Capture.");
+          } catch {
+            setError("Verification request failed.");
+            const media3 = videoRef.current?.srcObject;
+            if (media3 && "getTracks" in media3) media3.getTracks().forEach((t) => t.stop());
+            setStream(null);
+            setShowCamera(false);
+          } finally {
+            postVerifyRunningRef.current = false;
+          }
+        })();
+      }
     } else {
-      setChallengeMsg(`✅ Done! Now: ${CHALLENGE_TEXT[CHALLENGES[nextIndex]]}`);
+      const nextId = sessionChallengesRef.current[nextIndex];
+      setChallengeMsg(`✅ Done! Now: ${CHALLENGE_TEXT[nextId] || nextId}`);
+    }
+  };
+
+  const registerSustained = (ok, name, minFrames = SUSTAINED_FRAMES) => {
+    if (ok) {
+      sustainCountRef.current += 1;
+      if (sustainCountRef.current >= minFrames) {
+        markChallengeDoneRef.current(name);
+        sustainCountRef.current = 0;
+      }
+    } else {
+      sustainCountRef.current = 0;
     }
   };
 
@@ -250,23 +428,27 @@ export default function FaceMatch({ userEmail, onLogout }) {
   const runLivenessLoop = useCallback(async () => {
     if (isDetectingRef.current) return;
     if (!videoRef.current || videoRef.current.readyState < 2) return;
-    if (challengeIndexRef.current >= CHALLENGES.length) return;
+    const seqLen = sessionChallengesRef.current.length;
+    if (seqLen === 0 || challengeIndexRef.current >= seqLen) return;
 
     isDetectingRef.current = true;
     const video = videoRef.current;
 
     try {
       const detection = await faceapi
-        .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({
-          inputSize: 320,
-          scoreThreshold: 0.3,
-        }))
+        .detectSingleFace(
+          video,
+          new faceapi.TinyFaceDetectorOptions({
+            inputSize: 320,
+            scoreThreshold: 0.3,
+          })
+        )
         .withFaceLandmarks()
         .withFaceExpressions();
 
       if (detection) {
         faceLostCountRef.current = 0;
-        const pts  = detection.landmarks.positions;
+        const pts = detection.landmarks.positions;
         const expr = detection.expressions;
 
         // ── CALIBRATE BASELINE over 15 frames ──
@@ -275,21 +457,34 @@ export default function FaceMatch({ userEmail, onLogout }) {
           noseYHistoryRef.current.push(pts[30].y);
           noseCenterXHistoryRef.current.push(pts[30].x - faceCenterX);
           faceWidthHistoryRef.current.push(Math.abs(pts[16].x - pts[0].x));
+          calEyeAngRef.current.push(eyeTiltAngleRad(pts));
+          calLeftEarRef.current.push(landmarkEAR(pts, 36));
+          calRightEarRef.current.push(landmarkEAR(pts, 42));
 
           if (noseYHistoryRef.current.length >= 15) {
-            const sortedY  = [...noseYHistoryRef.current].sort((a, b) => a - b);
-            const sortedX  = [...noseCenterXHistoryRef.current].sort((a, b) => a - b);
+            const sortedY = [...noseYHistoryRef.current].sort((a, b) => a - b);
+            const sortedX = [...noseCenterXHistoryRef.current].sort((a, b) => a - b);
             const sortedFW = [...faceWidthHistoryRef.current].sort((a, b) => a - b);
+            const eyeAngles = [...calEyeAngRef.current].sort((a, b) => a - b);
+            const les = [...calLeftEarRef.current].sort((a, b) => a - b);
+            const res = [...calRightEarRef.current].sort((a, b) => a - b);
             const mid = Math.floor(sortedY.length / 2);
+            const eMid = Math.floor(eyeAngles.length / 2);
 
             baselineRef.current = {
-              noseTipY:    sortedY[mid],
+              noseTipY: sortedY[mid],
               noseCenterX: sortedX[mid],
-              faceWidth:   sortedFW[mid],
+              faceWidth: sortedFW[mid],
+              eyeAngle: eyeAngles[eMid] ?? 0,
+              leftEAR: les[eMid] ?? 0.25,
+              rightEAR: res[eMid] ?? 0.25,
             };
             noseYHistoryRef.current = [];
             noseCenterXHistoryRef.current = [];
             faceWidthHistoryRef.current = [];
+            calEyeAngRef.current = [];
+            calLeftEarRef.current = [];
+            calRightEarRef.current = [];
             console.log("✅ Baseline ready:", baselineRef.current);
           } else {
             console.log(`📊 Calibrating ${noseYHistoryRef.current.length}/15...`);
@@ -298,41 +493,68 @@ export default function FaceMatch({ userEmail, onLogout }) {
           return;
         }
 
-        const base      = baselineRef.current;
-        const challenge = CHALLENGES[challengeIndexRef.current];
+        const base = baselineRef.current;
+        const challenge = sessionChallengesRef.current[challengeIndexRef.current];
 
         if (challenge === "turn_left") {
           const faceCenter = (pts[0].x + pts[16].x) / 2;
           const noseOffset = pts[30].x - faceCenter;
-          const turnDelta  = base.noseCenterX - noseOffset;
-          const threshold  = base.faceWidth * 0.07; // very relaxed
-          console.log(`↩ turn: ${turnDelta.toFixed(1)} / need: ${threshold.toFixed(1)}`);
-          if (turnDelta > threshold) markChallengeDone("turn_left");
-
+          const turnDelta = base.noseCenterX - noseOffset;
+          const threshold = Math.max(4, base.faceWidth * 0.075);
+          registerSustained(turnDelta > threshold, "turn_left");
+        } else if (challenge === "turn_right") {
+          const faceCenter = (pts[0].x + pts[16].x) / 2;
+          const noseOffset = pts[30].x - faceCenter;
+          const turnDelta = noseOffset - base.noseCenterX;
+          const threshold = Math.max(4, base.faceWidth * 0.075);
+          registerSustained(turnDelta > threshold, "turn_right");
         } else if (challenge === "nod") {
-          const nodDelta  = pts[30].y - base.noseTipY;
-          const threshold = Math.max(5, base.faceWidth * 0.05); // very relaxed
-          console.log(`↕ nod: ${nodDelta.toFixed(1)} / need: ${threshold.toFixed(1)}`);
-          if (nodDelta > threshold) markChallengeDone("nod");
-
+          const nodDelta = pts[30].y - base.noseTipY;
+          const threshold = Math.max(6, base.faceWidth * 0.055);
+          registerSustained(nodDelta > threshold, "nod");
+        } else if (challenge === "look_up") {
+          const upDelta = base.noseTipY - pts[30].y;
+          const threshold = Math.max(6, base.faceWidth * 0.05);
+          registerSustained(upDelta > threshold, "look_up");
         } else if (challenge === "smile") {
-          console.log(`😊 happy: ${expr.happy.toFixed(2)}`);
-          if (expr.happy > 0.40) markChallengeDone("smile");
-
+          registerSustained(expr.happy > 0.42, "smile");
+        } else if (challenge === "surprised") {
+          registerSustained(expr.surprised > 0.38, "surprised");
         } else if (challenge === "mouth_open") {
           const mouthOpen = Math.abs(pts[62].y - pts[66].y);
-          const threshold = Math.max(4, base.faceWidth * 0.05);
-          console.log(`😮 mouth: ${mouthOpen.toFixed(1)} / need: ${threshold.toFixed(1)}`);
-          if (mouthOpen > threshold) markChallengeDone("mouth_open");
+          const threshold = Math.max(5, base.faceWidth * 0.055);
+          registerSustained(mouthOpen > threshold, "mouth_open");
+        } else if (challenge === "blink") {
+          const le = landmarkEAR(pts, 36);
+          const re = landmarkEAR(pts, 42);
+          const meanB = (base.leftEAR + base.rightEAR) / 2;
+          const lowTh = meanB * 0.55;
+          const hiTh = meanB * 0.88;
+          if (!blinkSawLowRef.current) {
+            if (le < lowTh && re < lowTh) blinkSawLowRef.current = true;
+          } else if (le > hiTh && re > hiTh) {
+            markChallengeDoneRef.current("blink");
+            blinkSawLowRef.current = false;
+          }
+        } else if (challenge === "tilt_head") {
+          const tilt = headTiltDeltaRad(eyeTiltAngleRad(pts), base.eyeAngle);
+          const need = 0.09;
+          registerSustained(tilt > need, "tilt_head");
+        } else if (challenge === "angry") {
+          registerSustained(expr.angry > 0.36, "angry");
         }
-
       } else {
         faceLostCountRef.current += 1;
+        sustainCountRef.current = 0;
+        blinkSawLowRef.current = false;
         if (faceLostCountRef.current > 15) {
           baselineRef.current = null;
           noseYHistoryRef.current = [];
           noseCenterXHistoryRef.current = [];
           faceWidthHistoryRef.current = [];
+          calEyeAngRef.current = [];
+          calLeftEarRef.current = [];
+          calRightEarRef.current = [];
           faceLostCountRef.current = 0;
           console.log("🔄 Baseline reset — face lost too long");
         }
@@ -364,13 +586,20 @@ export default function FaceMatch({ userEmail, onLogout }) {
     setCompletedChallenges([]);
     completedRef.current = [];
     setLivenessLive(false);
-    setChallengeMsg(CHALLENGE_TEXT[CHALLENGES[0]]);
+    const first = sessionChallengesRef.current[0];
+    setChallengeMsg(first ? CHALLENGE_TEXT[first] || first : "");
     baselineRef.current = null;
     noseYHistoryRef.current = [];
     noseCenterXHistoryRef.current = [];
     faceWidthHistoryRef.current = [];
+    calEyeAngRef.current = [];
+    calLeftEarRef.current = [];
+    calRightEarRef.current = [];
     faceLostCountRef.current = 0;
     challengeCooldownRef.current = false;
+    sustainCountRef.current = 0;
+    blinkSawLowRef.current = false;
+    postVerifyRunningRef.current = false;
   };
 
   const startCamera = async () => {
@@ -378,30 +607,78 @@ export default function FaceMatch({ userEmail, onLogout }) {
       setError("⏳ Models still loading, wait 3 seconds and try again.");
       return;
     }
+    setError(null);
+    setLivenessSessionLoading(true);
     try {
+      const deviceId = getOrCreateDeviceId();
+      const res = await fetch(`${API_URL}/liveness/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: deviceId }),
+      });
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
+      if (!res.ok) {
+        const msg =
+          res.status === 409
+            ? typeof data.detail === "string"
+              ? data.detail
+              : "All gesture sequences may be exhausted for this device."
+            : typeof data.detail === "string"
+              ? data.detail
+              : "Could not start liveness session.";
+        setError(msg);
+        setLivenessSessionLoading(false);
+        return;
+      }
+      const { session_id, gestures } = data;
+      if (!session_id || !Array.isArray(gestures) || gestures.length === 0) {
+        setError("Invalid server response for liveness session.");
+        setLivenessSessionLoading(false);
+        return;
+      }
+      livenessSessionIdRef.current = session_id;
+      livenessCompletedRef.current = false;
+      setCanMatch(false);
+      sessionChallengesRef.current = gestures;
+      setSessionChallenges(gestures);
+      resetLiveness();
+
       const s = await navigator.mediaDevices.getUserMedia({ video: true });
       setStream(s);
       setShowCamera(true);
-      resetLiveness();
+      setLivenessSessionLoading(false);
 
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = s;
           videoRef.current.onloadedmetadata = () => {
-            intervalRef.current     = setInterval(runLivenessLoop, 150);
+            intervalRef.current = setInterval(runLivenessLoop, 150);
             meshIntervalRef.current = setInterval(runMeshLoop, 500);
           };
         }
       }, 100);
     } catch {
+      setLivenessSessionLoading(false);
       setError("Camera access denied. Please allow camera permission.");
+      sessionChallengesRef.current = [];
+      setSessionChallenges([]);
+      livenessSessionIdRef.current = null;
+      livenessCompletedRef.current = false;
+      setCanMatch(false);
     }
   };
 
-  const stopCamera = () => {
+  const stopMediaOnly = () => {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     clearInterval(intervalRef.current);
     clearInterval(meshIntervalRef.current);
+    intervalRef.current = null;
+    meshIntervalRef.current = null;
     setStream(null);
     setShowCamera(false);
     setLivenessLive(false);
@@ -409,27 +686,36 @@ export default function FaceMatch({ userEmail, onLogout }) {
     if (canvas) canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
   };
 
+  const stopCamera = () => {
+    stopMediaOnly();
+    setSessionChallenges([]);
+    sessionChallengesRef.current = [];
+    livenessSessionIdRef.current = null;
+    livenessCompletedRef.current = false;
+    setCanMatch(false);
+    resetLiveness();
+  };
+
   const takeSelfie = () => {
-  const canvas  = canvasRef.current;
-  const video   = videoRef.current;
-  canvas.width  = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext("2d");
-
-  // ❌ Remove flip — test without it first
-  // ctx.translate(canvas.width, 0);
-  // ctx.scale(-1, 1);
-
-  ctx.drawImage(video, 0, 0);
-  canvas.toBlob((blob) => {
-    const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
-    handleFile(f);
-    stopCamera();
-  }, "image/jpeg");
-};
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob((blob) => {
+      const f = new File([blob], "selfie.jpg", { type: "image/jpeg" });
+      handleFile(f);
+      stopMediaOnly();
+    }, "image/jpeg");
+  };
 
   const handleMatch = async () => {
     if (!file) return;
+    if (!livenessSessionIdRef.current || !livenessCompletedRef.current || !canMatch) {
+      setError("Complete the camera liveness check first, then capture a selfie (or use your verified flow).");
+      return;
+    }
     setLoading(true);
     setError(null);
     setResults([]);
@@ -458,6 +744,10 @@ export default function FaceMatch({ userEmail, onLogout }) {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("top_k", 10);
+    formData.append("device_id", getOrCreateDeviceId());
+    if (livenessSessionIdRef.current) {
+      formData.append("liveness_session_id", livenessSessionIdRef.current);
+    }
     if (geo) {
       formData.append("geo_lat", geo.lat);
       formData.append("geo_long", geo.long);
@@ -478,6 +768,11 @@ export default function FaceMatch({ userEmail, onLogout }) {
       } else {
         setResults(data.matches);
         setProgress(100);
+        livenessSessionIdRef.current = null;
+        livenessCompletedRef.current = false;
+        setCanMatch(false);
+        setSessionChallenges([]);
+        sessionChallengesRef.current = [];
       }
     } catch (err) {
       clearTimeout(timeout);
@@ -554,7 +849,10 @@ export default function FaceMatch({ userEmail, onLogout }) {
           <div className="fm-logo">⬡</div>
           <div>
             <h1>Face Match</h1>
-            <p>Upload a face image — get top 10 matches from the dataset</p>
+            <p>
+              Complete the camera liveness flow, then capture or choose an image — Find Matches requires a verified
+              session.
+            </p>
           </div>
         </div>
 
@@ -591,7 +889,7 @@ export default function FaceMatch({ userEmail, onLogout }) {
             </div>
 
             <div className="fm-btn-row">
-              <button className="fm-btn" onClick={handleMatch} disabled={!file || loading}>
+              <button className="fm-btn" onClick={handleMatch} disabled={!file || loading || !canMatch}>
                 {loading ? <><span className="fm-spinner" /> Searching Faces...</> : "Find Matches"}
               </button>
               <button className="fm-camera-btn" onClick={showCamera ? stopCamera : startCamera}>
@@ -628,21 +926,29 @@ export default function FaceMatch({ userEmail, onLogout }) {
                 {!livenessLive ? (
                   <>
                     <div className="fm-liveness-title">
-                      {modelsLoaded ? "🔍 Liveness Check" : "⏳ Loading models..."}
+                      {livenessSessionLoading
+                        ? "⏳ Issuing challenge…"
+                        : modelsLoaded
+                          ? "🔍 Liveness Check"
+                          : "⏳ Loading models…"}
                     </div>
                     <div className="fm-liveness-steps">
-                      {CHALLENGES.map((c, i) => (
-                        <div
-                          key={c}
-                          className={`fm-liveness-step ${
-                            completedChallenges.includes(c) ? "done" :
-                            i === challengeIndex ? "active" : "pending"
-                          }`}
-                        >
-                          {completedChallenges.includes(c) ? "✅" : i === challengeIndex ? "▶" : "○"}
-                          &nbsp;{CHALLENGE_TEXT[c]}
-                        </div>
-                      ))}
+                      {sessionChallenges.length === 0 ? (
+                        <div className="fm-liveness-msg">Steps load when the session starts.</div>
+                      ) : (
+                        sessionChallenges.map((c, i) => (
+                          <div
+                            key={`${c}-${i}`}
+                            className={`fm-liveness-step ${
+                              completedChallenges.includes(c) ? "done" :
+                              i === challengeIndex ? "active" : "pending"
+                            }`}
+                          >
+                            {completedChallenges.includes(c) ? "✅" : i === challengeIndex ? "▶" : "○"}
+                            &nbsp;{CHALLENGE_TEXT[c] || c}
+                          </div>
+                        ))
+                      )}
                     </div>
                     {challengeMsg && <div className="fm-liveness-msg">{challengeMsg}</div>}
                   </>
